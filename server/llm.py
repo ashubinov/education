@@ -31,8 +31,8 @@ class _AuthError(LLMError):
 
 
 # ---- ранжирование бесплатных моделей OpenRouter ----
-FREE_PREF = [r"deepseek", r"qwen", r"nemotron-3-(ultra|super)", r"gemma-4-31b", r"laguna-s", r"gemma-4-26b", r"inkling(?!-small)", r"ling-"]
-FREE_BLOCK = re.compile(r"(safety|guard|embed|vision|-vl|vl-|audio|omni|lfm|nano|coder|code|small|mini|tiny|note|moderation|distill|reasoning)")
+FREE_PREF = [r"deepseek", r"qwen", r"nemotron-3-(ultra|super)", r"gemma-4-31b", r"laguna-s", r"gemma-4-26b", r"ling-"]
+FREE_BLOCK = re.compile(r"(inkling|safety|guard|embed|vision|-vl|vl-|audio|omni|lfm|nano|coder|code|small|mini|tiny|note|moderation|distill|reasoning)")
 # платные, но очень дешёвые (центы за курс) — только если включено в настройках
 PAID_PREF = ["deepseek/deepseek-v4-pro", "deepseek/deepseek-v3.2", "deepseek/deepseek-chat-v3.1", "qwen/qwen3-235b-a22b-2507"]
 
