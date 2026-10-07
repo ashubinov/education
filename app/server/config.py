@@ -37,13 +37,12 @@ FULL_TEXT_LIMIT = 28_000  # столько текста отправляем в 
 MODULE_CONTEXT_CHARS = 9_000
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1"
-# Запасной список, если не удалось получить каталог моделей OpenRouter
+# Запасной список бесплатных моделей, если не удалось получить каталог OpenRouter
 DEFAULT_MODELS = [
-    "deepseek/deepseek-chat-v3.1:free",
-    "deepseek/deepseek-chat-v3-0324:free",
-    "deepseek/deepseek-r1-0528:free",
-    "qwen/qwen3-235b-a22b:free",
-    "qwen/qwen3-next-80b-a3b-instruct:free",
+    "nvidia/nemotron-3-super-120b-a12b:free",
+    "google/gemma-4-31b-it:free",
+    "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "poolside/laguna-s-2.1:free",
 ]
 
 

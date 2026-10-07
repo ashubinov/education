@@ -12,7 +12,7 @@ sys.path.insert(0, ".")
 from server import engine  # noqa: E402
 from server.db import db  # noqa: E402
 
-base = "http://127.0.0.1:8011"
+base = os.environ.get("PLAY_BASE", "http://127.0.0.1:8011")
 user, pw, cid, n = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
 mistakes = int(sys.argv[5]) if len(sys.argv) > 5 else 0
 c = httpx.Client(base_url=base, timeout=90)

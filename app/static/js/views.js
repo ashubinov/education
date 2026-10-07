@@ -286,9 +286,17 @@ async function drawSettings() {
       <p class="small muted mt" style="margin-bottom:0">Браузерные уведомления приходят, пока вкладка открыта (можно свёрнутой). Чтобы получать напоминания всегда — подключи Telegram.</p></div>
     <div class="card" id="tgcard"><h3>✈️ Telegram-бот</h3>${tgHtml(tg)}</div>
     ${set.is_admin ? html`<div class="card"><h3>🤖 Модель ИИ и ключи</h3>
-      <div class="row wrap gap-s mb"><span class="chip ${set.llm.configured ? 'good' : 'warn'}">${set.llm.mock ? 'демо-режим (без ИИ)' : set.llm.configured ? 'ключ OpenRouter задан ' + (set.llm.key_hint || '') : 'ключ не задан'}</span>${set.llm.last_model ? html`<span class="chip">последняя модель: ${set.llm.last_model}</span>` : ''}</div>
-      <div class="field"><label>Ключ OpenRouter (openrouter.ai/keys)</label><input type="password" id="orkey" placeholder="sk-or-v1-… (оставь пустым, чтобы не менять)" autocomplete="off"></div>
-      <div class="field"><label>Модели по приоритету (необязательно, через запятую)</label><input type="text" id="models" value="${(set.llm.models || []).join(', ')}" placeholder="авто: бесплатные DeepSeek → Qwen"></div>
+      <div class="row wrap gap-s mb"><span class="chip ${set.llm.configured ? 'good' : 'warn'}">${set.llm.mock ? 'демо-режим (без ИИ)' : set.llm.configured ? 'ИИ подключён' : 'ключ не задан'}</span>${set.llm.last_model ? html`<span class="chip">последняя модель: ${set.llm.last_model}</span>` : ''}</div>
+      ${(set.llm.chain || []).length ? html`<p class="small muted">Порядок моделей: ${set.llm.chain.map((m, i) => (i ? ' → ' : '') + m).join('')}</p>` : ''}
+      <div class="field"><label>Ключ OpenRouter (openrouter.ai/keys) ${set.llm.key_hint ? '· задан ' + set.llm.key_hint : ''}</label><input type="password" id="orkey" placeholder="sk-or-v1-… (оставь пустым, чтобы не менять)" autocomplete="off"></div>
+      <div class="row spread mb"><span><b>Разрешить дешёвые платные модели DeepSeek</b><div class="small muted">≈ 5–15 центов за курс. Нужен баланс на OpenRouter (от $5). Бесплатные останутся запасными.</div></span><label class="switch"><input type="checkbox" id="paid" ${set.llm.paid ? 'checked' : ''}><span></span></label></div>
+      <details class="mb" ${set.llm.custom ? 'open' : ''}><summary style="cursor:pointer;font-weight:800">Свой провайдер (DeepSeek напрямую, Cerebras, Groq… — любой OpenAI-совместимый API)</summary>
+        <div class="row wrap gap-s mt"><button class="btn sm ghost" data-act="preset" data-u="https://api.deepseek.com" data-m="deepseek-chat">DeepSeek</button><button class="btn sm ghost" data-act="preset" data-u="https://api.cerebras.ai/v1" data-m="qwen-3-235b-a22b-instruct-2507">Cerebras (Qwen)</button><button class="btn sm ghost" data-act="preset" data-u="https://api.groq.com/openai/v1" data-m="qwen/qwen3-32b">Groq (Qwen)</button></div>
+        <div class="field mt"><label>Адрес API (base URL)</label><input type="text" id="cubase" value="${set.llm.custom ? set.llm.custom.base : ''}" placeholder="https://api.deepseek.com"></div>
+        <div class="field"><label>Ключ ${set.llm.custom && set.llm.custom.key_set ? '· задан' : ''}</label><input type="password" id="cukey" placeholder="оставь пустым, чтобы не менять" autocomplete="off"></div>
+        <div class="field"><label>Модели по приоритету (через запятую)</label><input type="text" id="cumodels" value="${set.llm.custom ? set.llm.custom.models.join(', ') : ''}" placeholder="deepseek-chat"></div>
+        <div class="small muted">Эти модели пробуются первыми, при ошибке — OpenRouter. Чтобы отключить, очисти адрес и сохрани.</div></details>
+      <div class="field"><label>Свой список моделей OpenRouter (необязательно, через запятую)</label><input type="text" id="models" value="${(set.llm.models || []).join(', ')}" placeholder="авто: лучшие бесплатные модели каталога"></div>
       <div class="field"><label>Токен Telegram-бота (от @BotFather)</label><input type="password" id="tgtoken" placeholder="${set.telegram.configured ? 'токен задан — оставь пустым, чтобы не менять' : '123456:ABC…'}" autocomplete="off"></div>
       <div class="row"><button class="btn" data-act="saveAdmin">Сохранить</button><button class="btn ghost" data-act="testLLM">Проверить модель</button></div><div id="llmres" class="small mt"></div></div>` : ''}
     <div class="row"><button class="btn ghost" data-act="logout">Выйти из аккаунта</button></div></div>`));
@@ -326,8 +334,12 @@ actions.tgLink = async b => {
   } catch (e) { toast(e.message, { icon: '⚠️' }); }
 };
 actions.tgUnlink = async () => { await api('/telegram/unlink', { method: 'POST' }); drawSettings(); refreshMe(); };
+actions.preset = b => { $('#cubase').value = b.dataset.u; $('#cumodels').value = b.dataset.m; $('#cukey').focus(); };
 actions.saveAdmin = async () => {
-  const body = { llm_models: $('#models').value }; if ($('#orkey').value.trim()) body.openrouter_key = $('#orkey').value.trim(); if ($('#tgtoken').value.trim()) body.telegram_token = $('#tgtoken').value.trim();
+  const body = { llm_models: $('#models').value, llm_paid: $('#paid').checked, llm_base_url: $('#cubase').value, llm_custom_models: $('#cumodels').value };
+  if ($('#orkey').value.trim()) body.openrouter_key = $('#orkey').value.trim();
+  if ($('#cukey').value.trim()) body.llm_api_key = $('#cukey').value.trim();
+  if ($('#tgtoken').value.trim()) body.telegram_token = $('#tgtoken').value.trim();
   try { await api('/settings', { method: 'PUT', json: body }); toast('Настройки сохранены', { icon: '✅' }); drawSettings(); } catch (e) { toast(e.message, { icon: '⚠️' }); }
 };
 actions.testLLM = async b => {

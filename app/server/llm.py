@@ -1,7 +1,12 @@
-"""Клиент LLM через открытое API OpenRouter: бесплатные DeepSeek -> Qwen, с запасными моделями."""
+"""Клиент LLM через открытые OpenAI-совместимые API.
+
+Цепочка моделей (перебираются по порядку, пока одна не вернёт валидный ответ):
+  1. свой провайдер (LLM_BASE_URL + LLM_API_KEY + LLM_CUSTOM_MODELS) — например, DeepSeek напрямую, Cerebras, Groq;
+  2. OpenRouter: если разрешены платные — дешёвые DeepSeek/Qwen; затем лучшие БЕСПЛАТНЫЕ модели каталога
+     (DeepSeek и Qwen идут первыми, когда они там есть; сейчас в бесплатном каталоге — Nemotron, Gemma и др.).
+"""
 import asyncio
 import json
-import os
 import re
 import time
 
@@ -9,7 +14,6 @@ import httpx
 
 from . import config
 from .db import db
-
 
 TRANSPORT = None  # httpx-транспорт для тестов (MockTransport)
 
@@ -19,97 +23,145 @@ class LLMError(Exception):
 
 
 class LLMUnavailable(LLMError):
-    """Нет ключа или все модели недоступны."""
+    """Нет ключа или ключ отклонён всеми провайдерами."""
 
 
-def _rank(model_id: str) -> int:
+class _AuthError(LLMError):
+    pass
+
+
+# ---- ранжирование бесплатных моделей OpenRouter ----
+FREE_PREF = [r"deepseek", r"qwen", r"nemotron-3-(ultra|super)", r"gemma-4-31b", r"laguna-s", r"gemma-4-26b", r"inkling(?!-small)", r"ling-"]
+FREE_BLOCK = re.compile(r"(safety|guard|embed|vision|-vl|vl-|audio|omni|lfm|nano|coder|code|small|mini|tiny|note|moderation|distill|reasoning)")
+# платные, но очень дешёвые (центы за курс) — только если включено в настройках
+PAID_PREF = ["deepseek/deepseek-v4-pro", "deepseek/deepseek-v3.2", "deepseek/deepseek-chat-v3.1", "qwen/qwen3-235b-a22b-2507"]
+
+
+def _free_rank(model_id: str) -> tuple:
     m = model_id.lower()
-    if "deepseek" in m:
-        if "chat" in m or "v3" in m:
-            return 0
-        if "r1" in m and "distill" not in m:
-            return 2
-        return 3
-    if "qwen" in m:
-        if "coder" in m or "vl" in m:
-            return 6
-        if "235b" in m or "next" in m or "80b" in m or "instruct" in m:
-            return 4
-        return 5
-    return 9
+    for i, pat in enumerate(FREE_PREF):
+        if re.search(pat, m):
+            sub = 0
+            if "deepseek" in m:
+                sub = 0 if ("chat" in m or "v3" in m) else 2 if "r1" in m else 3
+            elif "qwen" in m:
+                sub = 0 if any(x in m for x in ("235b", "next", "80b", "instruct")) else 1
+            return (i, sub, m)
+    return (50, 0, m)
 
 
 class LLM:
     def __init__(self):
-        self._models: list[str] = []
-        self._models_at = 0.0
+        self._or_models: list[str] = []
+        self._or_at = 0.0
         self._cool: dict[str, float] = {}
         self._sem = asyncio.Semaphore(2)
         self.last_model = ""
         self.stats = {"calls": 0, "errors": 0}
+        self.catalog_ok = True
 
     # ---------- настройки ----------
     def api_key(self) -> str:
         return (db.get_setting("openrouter_key") or config.env("OPENROUTER_API_KEY")).strip()
 
+    def custom(self) -> dict | None:
+        base = (db.get_setting("llm_base_url") or config.env("LLM_BASE_URL")).strip().rstrip("/")
+        models = [m.strip() for m in (db.get_setting("llm_custom_models") or config.env("LLM_CUSTOM_MODELS")).split(",") if m.strip()]
+        if not base or not models:
+            return None
+        return {"name": "custom", "base": base, "key": (db.get_setting("llm_api_key") or config.env("LLM_API_KEY")).strip(), "models": models}
+
     def mock(self) -> bool:
         return config.env("LLM_MOCK") == "1" or db.get_setting("llm_mock") == "1"
 
     def configured(self) -> bool:
-        return bool(self.api_key()) or self.mock()
+        return bool(self.api_key()) or bool(self.custom()) or self.mock()
+
+    def paid_allowed(self) -> bool:
+        return (db.get_setting("llm_paid") or config.env("LLM_ALLOW_PAID")) in ("1", "true", "yes")
 
     def forced_models(self) -> list[str]:
         raw = db.get_setting("llm_models") or config.env("LLM_MODELS")
         return [m.strip() for m in raw.split(",") if m.strip()]
 
+    def reset_cache(self):
+        self._or_models, self._or_at = [], 0.0
+        self._cool.clear()
+
+    # ---------- каталог OpenRouter ----------
     async def models(self) -> list[str]:
+        """Упорядоченный список моделей OpenRouter (без своего провайдера)."""
         forced = self.forced_models()
         if forced:
             return forced
-        if self._models and time.time() - self._models_at < 3600:
-            return self._models
-        found: list[str] = []
+        paid = self.paid_allowed()
+        if self._or_models and time.time() - self._or_at < 3600:
+            return self._or_models
+        free: list[str] = []
+        ids: set[str] = set()
         try:
             async with httpx.AsyncClient(timeout=20, transport=TRANSPORT) as c:
                 r = await c.get(f"{config.OPENROUTER_URL}/models")
                 r.raise_for_status()
                 for m in r.json().get("data", []):
                     mid = m.get("id", "")
-                    if mid.endswith(":free") and ("deepseek" in mid or "qwen" in mid):
-                        if any(x in mid for x in ("vl", "coder", "distill", "embed", "guard")):
-                            continue
-                        ctx = m.get("context_length") or 0
-                        if ctx and ctx < 16000:
-                            continue
-                        found.append(mid)
+                    ids.add(mid)
+                    if not mid.endswith(":free") or FREE_BLOCK.search(mid.lower()):
+                        continue
+                    ctx = m.get("context_length") or 0
+                    if ctx and ctx < 32000:
+                        continue
+                    free.append(mid)
+            self.catalog_ok = True
         except Exception:
-            pass
-        found.sort(key=lambda x: (_rank(x), x))
-        self._models = (found[:8] or list(config.DEFAULT_MODELS))
-        self._models_at = time.time()
-        return self._models
+            self.catalog_ok = False
+        free.sort(key=_free_rank)
+        out = []
+        if paid:
+            out += [m for m in PAID_PREF if m in ids or not ids]
+        out += free[:6] or list(config.DEFAULT_MODELS)
+        self._or_models = out
+        self._or_at = time.time()
+        return out
+
+    async def chain(self) -> list[tuple[str, str]]:
+        """Полная цепочка: [(провайдер, модель), ...]."""
+        out: list[tuple[str, str]] = []
+        cu = self.custom()
+        if cu:
+            out += [("custom", m) for m in cu["models"]]
+        if self.api_key():
+            out += [("openrouter", m) for m in await self.models()]
+        return out
+
+    def _provider(self, name: str) -> dict:
+        if name == "custom":
+            cu = self.custom()
+            return {"base": cu["base"], "key": cu["key"], "headers": {}}
+        return {"base": config.OPENROUTER_URL, "key": self.api_key(),
+                "headers": {"HTTP-Referer": "http://localhost:8000", "X-Title": "LearnQuest"}}
 
     # ---------- вызовы ----------
-    async def _call(self, model: str, messages: list[dict], *, temperature: float, max_tokens: int, json_mode: bool) -> str:
+    async def _call(self, provider: str, model: str, messages: list[dict], *, temperature: float, max_tokens: int, json_mode: bool, plain: bool = False) -> str:
+        pv = self._provider(provider)
         body = {"model": model, "messages": messages, "temperature": temperature, "max_tokens": max_tokens}
+        if provider == "openrouter" and not plain:
+            # рассуждающие модели (Nemotron и др.) тратят токены на «мысли»: даём запас и просим думать поменьше
+            body["max_tokens"] = max_tokens + 3000
+            body["reasoning"] = {"effort": "low"}
         if json_mode:
             body["response_format"] = {"type": "json_object"}
-        headers = {
-            "Authorization": f"Bearer {self.api_key()}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": "http://localhost:8000",
-            "X-Title": "LearnQuest",
-        }
+        headers = {"Content-Type": "application/json", **pv["headers"]}
+        if pv["key"]:
+            headers["Authorization"] = f"Bearer {pv['key']}"
         timeout = httpx.Timeout(connect=15, read=170, write=30, pool=30)
         async with httpx.AsyncClient(timeout=timeout, transport=TRANSPORT) as c:
-            r = await c.post(f"{config.OPENROUTER_URL}/chat/completions", json=body, headers=headers)
-        if r.status_code == 400 and json_mode:
-            # часть провайдеров не поддерживает response_format
-            return await self._call(model, messages, temperature=temperature, max_tokens=max_tokens, json_mode=False)
-        if r.status_code in (401, 403):
-            raise LLMUnavailable("OpenRouter отклонил ключ API (проверьте ключ в настройках)")
-        if r.status_code == 402:
-            raise LLMUnavailable("На OpenRouter нет средств/лимита для этой модели")
+            r = await c.post(f"{pv['base']}/chat/completions", json=body, headers=headers)
+        if r.status_code == 400 and (json_mode or "reasoning" in body):
+            # часть провайдеров не поддерживает response_format / reasoning — повторяем в упрощённом виде
+            return await self._call(provider, model, messages, temperature=temperature, max_tokens=max_tokens, json_mode=False, plain=True)
+        if r.status_code == 401:
+            raise _AuthError(f"{provider}: ключ API отклонён (401)")
         if r.status_code >= 400:
             raise LLMError(f"{model}: HTTP {r.status_code} {r.text[:200]}")
         data = r.json()
@@ -126,52 +178,60 @@ class LLM:
 
     async def chat_json(self, system: str, user: str, *, task: str, ctx: dict | None = None,
                         validate=None, max_tokens: int = 4500, temperature: float = 0.35) -> dict:
-        """Запросить JSON. validate(obj) -> obj|raises ValueError. Перебирает модели и пробует починить ответ."""
+        """Запросить JSON. validate(obj) -> obj | ValueError. Перебирает цепочку моделей, просит исправить формат."""
         if self.mock():
             from . import llm_mock
             await asyncio.sleep(0.15)
             obj = llm_mock.respond(task, ctx or {})
             return validate(obj) if validate else obj
-        if not self.api_key():
-            raise LLMUnavailable("Не задан ключ OpenRouter. Добавьте его в настройках или в файле .env")
+        chain = await self.chain()
+        if not chain:
+            raise LLMUnavailable("Не задан ключ API. Добавьте ключ OpenRouter в настройках или в файле .env")
 
-        models = await self.models()
         now = time.time()
-        order = [m for m in models if self._cool.get(m, 0) < now] or models
+        order = [e for e in chain if self._cool.get(f"{e[0]}|{e[1]}", 0) < now] or chain
         last_err: Exception | None = None
-        messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+        auth_only = True
+        base_messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+        bad_providers: set[str] = set()
         async with self._sem:
-            for model in order[:5]:
+            for provider, model in order[:6]:
+                if provider in bad_providers:
+                    continue
+                messages = list(base_messages)
                 raw = ""
                 for attempt in range(2):
                     try:
                         self.stats["calls"] += 1
-                        raw = await self._call(model, messages, temperature=temperature,
-                                               max_tokens=max_tokens, json_mode=True)
+                        raw = await self._call(provider, model, messages, temperature=temperature, max_tokens=max_tokens, json_mode=True)
                         obj = extract_json(raw)
                         if validate:
                             obj = validate(obj)
                         self.last_model = model
                         return obj
-                    except LLMUnavailable:
-                        raise
-                    except (ValueError, KeyError, TypeError, json.JSONDecodeError) as e:
+                    except _AuthError as e:
                         last_err = e
+                        bad_providers.add(provider)
+                        self._cool[f"{provider}|{model}"] = time.time() + 300
+                        break
+                    except (ValueError, KeyError, TypeError, json.JSONDecodeError) as e:
+                        last_err, auth_only = e, False
                         self.stats["errors"] += 1
-                        # просим модель исправить формат
-                        messages = messages[:2] + [
+                        messages = base_messages + [
                             {"role": "assistant", "content": raw[:3000] or "{}"},
-                            {"role": "user", "content": f"Ответ не прошёл проверку: {str(e)[:300]}. "
-                                                         "Верни ТОЛЬКО исправленный валидный JSON, без пояснений."},
+                            {"role": "user", "content": f"Ответ не прошёл проверку: {str(e)[:300]}. Верни ТОЛЬКО исправленный валидный JSON, без пояснений."},
                         ]
                     except (LLMError, httpx.HTTPError, asyncio.TimeoutError) as e:
-                        last_err = e
+                        last_err, auth_only = e, False
                         self.stats["errors"] += 1
-                        self._cool[model] = time.time() + 90
-                        if "429" in str(e):
+                        txt = str(e)
+                        # 402/404 (нет баланса / модель недоступна) — надолго; 429/5xx — ненадолго
+                        self._cool[f"{provider}|{model}"] = time.time() + (3600 if ("HTTP 402" in txt or "HTTP 404" in txt) else 90)
+                        if "HTTP 429" in txt:
                             await asyncio.sleep(2)
                         break  # следующая модель
-                messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+        if auth_only and isinstance(last_err, _AuthError):
+            raise LLMUnavailable(f"Ключ API отклонён: {last_err}. Проверьте ключ в настройках.")
         raise LLMError(f"Не удалось получить ответ модели: {last_err}")
 
 

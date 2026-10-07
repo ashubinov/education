@@ -140,13 +140,24 @@ async def update_me(request: Request, body: dict = Body(...)):
 
 
 # =============================================================== настройки (админ)
+def _hint(key: str) -> str:
+    return ("…" + key[-4:]) if key else ""
+
+
 @app.get("/api/settings")
 async def get_settings(request: Request):
     u = me(request)
+    cu = llm.custom()
     out = {"is_admin": bool(u["is_admin"]), "telegram": {"bot": tgbot.bot_username(), "configured": bool(tgbot.token())},
-           "llm": {"configured": llm.configured(), "mock": llm.mock(), "models": llm.forced_models(), "last_model": llm.last_model}}
+           "llm": {"configured": llm.configured(), "mock": llm.mock(), "last_model": llm.last_model,
+                   "openrouter": bool(llm.api_key()), "paid": llm.paid_allowed(), "models": llm.forced_models(),
+                   "custom": {"base": cu["base"], "models": cu["models"], "key_set": bool(cu["key"])} if cu else None}}
     if u["is_admin"]:
-        out["llm"]["key_hint"] = ("…" + llm.api_key()[-4:]) if llm.api_key() else ""
+        out["llm"]["key_hint"] = _hint(llm.api_key())
+        try:
+            out["llm"]["chain"] = [f"{m}" if p == "openrouter" else f"{m} (свой API)" for p, m in await llm.chain()][:8]
+        except Exception:
+            out["llm"]["chain"] = []
     return out
 
 
@@ -155,11 +166,14 @@ async def put_settings(request: Request, body: dict = Body(...)):
     u = me(request)
     if not u["is_admin"]:
         raise HTTPException(403, "Только администратор (первый зарегистрированный пользователь)")
-    if "openrouter_key" in body:
-        db.set_setting("openrouter_key", str(body["openrouter_key"]).strip())
-    if "llm_models" in body:
-        db.set_setting("llm_models", str(body["llm_models"]).strip())
-        llm._models = []
+    for key, setting in (("openrouter_key", "openrouter_key"), ("llm_base_url", "llm_base_url"), ("llm_api_key", "llm_api_key"),
+                         ("llm_custom_models", "llm_custom_models"), ("llm_models", "llm_models")):
+        if key in body:
+            db.set_setting(setting, str(body[key]).strip())
+    if "llm_paid" in body:
+        db.set_setting("llm_paid", "1" if body["llm_paid"] else "0")
+    if any(k in body for k in ("llm_models", "llm_paid", "openrouter_key", "llm_base_url", "llm_custom_models")):
+        llm.reset_cache()
     if "telegram_token" in body:
         db.set_setting("telegram_token", str(body["telegram_token"]).strip())
         await tgbot.restart()
