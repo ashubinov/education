@@ -110,6 +110,9 @@ def user_from_request(request: Request):
         return None
     if not u or (u["token_version"] or 0) != data.get("tv", 0) or u["username"] == SYSTEM_USERNAME:
         return None
+    if is_admin_name(u["username"]) and not u["is_admin"]:  # ADMIN_USERNAME добавили/изменили уже после регистрации
+        db.x("UPDATE users SET is_admin=1 WHERE id=?", (u["id"],))
+        u["is_admin"] = 1
     return u
 
 
