@@ -270,6 +270,7 @@ const COLORS = ['#7c5cff', '#3b82f6', '#06b6d4', '#10b981', '#84cc16', '#f59e0b'
 const AVATARS = ['🦊', '🐼', '🦉', '🐙', '🦄', '🐲', '🐱', '🐶', '🦁', '🐸', '🚀', '🧙'];
 route(/^#\/settings$/, async () => { await drawSettings(); });
 async function drawSettings() {
+  const keepY = window.scrollY;
   const [set, tg] = await Promise.all([api('/settings'), api('/telegram/status')]);
   S.settings = set; const u = S.user;
   render(app(), shell('settings', html`<h1>Настройки</h1><div class="col" style="max-width:760px">
@@ -290,6 +291,7 @@ async function drawSettings() {
       <div class="field"><label>Токен Telegram-бота (от @BotFather)</label><input type="password" id="tgtoken" placeholder="${set.telegram.configured ? 'токен задан — оставь пустым, чтобы не менять' : '123456:ABC…'}" autocomplete="off"></div>
       <div class="row"><button class="btn" data-act="saveAdmin">Сохранить</button><button class="btn ghost" data-act="testLLM">Проверить модель</button></div><div id="llmres" class="small mt"></div></div>` : ''}
     <div class="row"><button class="btn ghost" data-act="logout">Выйти из аккаунта</button></div></div>`));
+  window.scrollTo(0, keepY);
   const snd = $('#snd'); if (snd) snd.onchange = async () => { await saveMe({ sound: snd.checked }); };
   const cc = $('#customcolor'); if (cc) cc.oninput = () => applyTheme(cc.value, S.user.theme_mode), cc.onchange = () => saveMe({ theme_color: cc.value }, true);
   if (tg.configured && !tg.linked && S.tgPolling) every(async () => { const s = await api('/telegram/status'); if (s.linked) { S.tgPolling = false; toast('Telegram подключён!', { icon: '✈️' }); drawSettings(); refreshMe(); } }, 3000);

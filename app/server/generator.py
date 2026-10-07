@@ -457,10 +457,20 @@ async def plan_module(module_id: int):
         m2 = dict(m)
         m2["objectives"] = jl(m["objectives"], [])
         m2["_course_practice"] = bool(c["has_practice"] and m["practical"])
-        obj = await llm.chat_json(prompts.system(c["language"]),
-                                  prompts.module_plan(c["title"], m2, ctx_text, profile, done_terms),
-                                  task="module_plan", ctx={"module": m2, "context": ctx_text, "done_terms": done_terms},
-                                  validate=norm_plan, max_tokens=2000)
+        def v(o):
+            plan = norm_plan(o)
+            plan["questions"] = norm_questions(o, 5, seed=module_id, maximum=10)
+            return plan
+
+        try:
+            obj = await llm.chat_json(prompts.system(c["language"]),
+                                      prompts.module_start(c["title"], m2, ctx_text, profile, done_terms),
+                                      task="module_start", ctx={"module": m2, "context": ctx_text, "done_terms": done_terms},
+                                      validate=v, max_tokens=7000)
+        except Exception as e:  # запоминаем причину, чтобы интерфейс не ждал вечно
+            db.x("UPDATE modules SET plan=? WHERE id=?", (jd({"error": f"Не удалось подготовить модуль: {e}"[:400]}), module_id))
+            raise
+        questions = obj.pop("questions")
         if not (c["has_practice"] and m["practical"]):
             obj["practice_tasks"] = 0
         elif obj["practice_tasks"] == 0:
@@ -468,6 +478,8 @@ async def plan_module(module_id: int):
         with db.tx():
             db.x("UPDATE modules SET plan=?, status='planned' WHERE id=?", (jd(obj), module_id))
             build_skeleton(c["id"], module_id, obj)
+            db.x("UPDATE lessons SET content=?, status='ready' WHERE module_id=? AND type='intro_test'",
+                 (jd({"questions": questions}), module_id))
 
 
 # ======================================================================= генерация уроков
@@ -552,18 +564,35 @@ async def _generate(l: dict):
         content = obj
 
     elif typ == "terms":
-        terms = meta.get("terms") or plan_terms[:3]
-        known = [p["term"] for p in _module_terms_pool(m["id"])] + [t["term"] for t in plan_terms]
-        obj = await llm.chat_json(sysmsg, prompts.terms_lesson(c["title"], mod, terms, ctx_text, profile, _uniq(known)),
-                                  task="terms", ctx={"module": mod, "terms": terms, "context": ctx_text},
-                                  validate=lambda o: {"terms": norm_terms(o, terms)}, max_tokens=4000)
-        content = obj
-        # парный тест строим локально — без лишнего вызова LLM
-        pair = _pair_lesson(l["id"], "terms_test")
-        if pair and not pair["content"]:
-            pool = _module_terms_pool(m["id"]) + obj["terms"]
-            qs = build_terms_test(obj["terms"], pool, seed=l["id"])
-            db.x("UPDATE lessons SET content=?, status='ready' WHERE id=?", (jd({"questions": qs}), pair["id"]))
+        # все ещё не готовые уроки «термины» модуля делаем ОДНИМ запросом (экономим лимит бесплатного API)
+        async with lock(f"terms:{m['id']}"):
+            cur = db.one("SELECT content FROM lessons WHERE id=?", (l["id"],))
+            if cur and cur["content"]:
+                db.x("UPDATE lessons SET status='ready' WHERE id=? AND status='generating'", (l["id"],))
+                return
+            batch = [l]
+            if not meta.get("remedial"):
+                for x in db.q("SELECT * FROM lessons WHERE module_id=? AND type='terms' AND content IS NULL AND id<>? ORDER BY idx", (m["id"], l["id"])):
+                    xm = jl(x["meta"], {})
+                    if not xm.get("remedial") and x["status"] in ("pending", "failed"):
+                        batch.append(x)
+            batch = batch[:3]
+            groups = [(b, (jl(b["meta"], {}).get("terms") or plan_terms[:3])) for b in batch]
+            all_terms = [t for _, g in groups for t in g]
+            known = [p["term"] for p in _module_terms_pool(m["id"])] + [t["term"] for t in plan_terms]
+            obj = await llm.chat_json(sysmsg, prompts.terms_lesson(c["title"], mod, all_terms, ctx_text, profile, _uniq(known)),
+                                      task="terms", ctx={"module": mod, "terms": all_terms, "context": ctx_text},
+                                      validate=lambda o: {"terms": norm_terms(o, all_terms)}, max_tokens=7000)
+            by_name = {grading.norm(t["term"]): t for t in obj["terms"]}
+            pool = _module_terms_pool(m["id"])
+            for b, g in groups:
+                items = [by_name[grading.norm(t["term"])] for t in g]
+                db.x("UPDATE lessons SET content=?, status='ready', error=NULL WHERE id=?", (jd({"terms": items}), b["id"]))
+                pair = _pair_lesson(b["id"], "terms_test")
+                if pair and not pair["content"]:  # парный тест строим локально — без лишнего вызова LLM
+                    qs = build_terms_test(items, pool + obj["terms"], seed=b["id"])
+                    db.x("UPDATE lessons SET content=?, status='ready' WHERE id=?", (jd({"questions": qs}), pair["id"]))
+            return
 
     elif typ == "practice":
         prev = [jl(x["content"], {}).get("task", {}).get("title", "") for x in
@@ -719,7 +748,15 @@ async def _finish_module(c: dict, m: dict, l: dict):
     if not left:
         db.x("UPDATE courses SET status='completed' WHERE id=?", (c["id"],))
         return
-    # анализ успеваемости и корректировка продолжения
+    # анализ успеваемости и корректировка продолжения (вызов модели — только если ученик буксует, чтобы беречь лимиты)
+    acc = db.val("""SELECT AVG(a.correct) FROM answers a JOIN lessons l ON l.id=a.lesson_id
+                    WHERE a.user_id=? AND l.module_id=?""", (c["user_id"], m["id"]), 1.0)
+    done_modules = db.val("SELECT COUNT(*) FROM modules WHERE course_id=? AND status='done'", (c["id"],), 0)
+    if acc >= 0.8 and done_modules % 3 != 0:
+        msg = ("Отличный результат — иду дальше в том же темпе!" if acc >= 0.9 else "Хорошо усвоено. Двигаемся дальше!")
+        db.x("UPDATE modules SET plan=json_set(COALESCE(plan,'{}'), '$.message', ?) WHERE id=?", (msg, m["id"]))
+        await prepare_next(c["id"])
+        return
     try:
         summary = module_summary_text(c["user_id"], c["id"], m["id"])
         remaining = [{"title": x["title"], "summary": x["summary"]} for x in left if x["status"] == "new"]

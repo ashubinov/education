@@ -299,6 +299,11 @@ async def course_next(cid: int, request: Request, retry: int = 0):
     if not l:
         nm = generator.next_unplanned_module(cid)
         if nm:
+            err = (jl(nm["plan"], {}) or {}).get("error")
+            if err and not retry:
+                return {"state": "failed", "error": err}
+            if err:
+                db.x("UPDATE modules SET plan=NULL WHERE id=?", (nm["id"],))
             if not generator.lock(f"module:{nm['id']}").locked():
                 generator.spawn(generator.prepare_next(cid))
             return {"state": "preparing", "text": "Готовлю следующий модуль…"}

@@ -10,6 +10,8 @@ import httpx
 from . import config, engine, generator, gamification as gm, service, svgtools
 from .db import db, jl
 
+TRANSPORT = None  # httpx-транспорт для тестов
+API_BASE = "https://api.telegram.org"
 _task: asyncio.Task | None = None
 _username = ""
 _error = ""
@@ -41,8 +43,8 @@ def esc(s) -> str:
 async def api(method: str, **params):
     global _client
     if _client is None:
-        _client = httpx.AsyncClient(timeout=httpx.Timeout(connect=15, read=60, write=30, pool=30))
-    r = await _client.post(f"https://api.telegram.org/bot{token()}/{method}", json=params)
+        _client = httpx.AsyncClient(timeout=httpx.Timeout(connect=15, read=60, write=30, pool=30), transport=TRANSPORT)
+    r = await _client.post(f"{API_BASE}/bot{token()}/{method}", json=params)
     data = r.json()
     if not data.get("ok"):
         raise RuntimeError(f"Telegram {method}: {data.get('description')}")
@@ -78,7 +80,7 @@ async def send_photo(chat_id: int, png: bytes, caption: str, buttons=None):
     data = {"chat_id": str(chat_id), "caption": caption[:1000], "parse_mode": "HTML"}
     if buttons:
         data["reply_markup"] = json.dumps({"inline_keyboard": [[{"text": t, "callback_data": d} for t, d in row] for row in buttons]})
-    r = await _client.post(f"https://api.telegram.org/bot{token()}/sendPhoto", data=data, files={"photo": ("q.png", png, "image/png")})
+    r = await _client.post(f"{API_BASE}/bot{token()}/sendPhoto", data=data, files={"photo": ("q.png", png, "image/png")})
     return r.json()
 
 
@@ -120,7 +122,7 @@ def render_step(v: dict) -> tuple[str, list]:
         txt = f"{head}\n\n📖 <b>{esc(st['term'])}</b>\n{esc(st['definition'])}"
         if st.get("example"):
             txt += f"\n\n💡 <i>{esc(st['example'])}</i>"
-        return txt, [[("Запомнил ▶️", f"n:{rid}")]]
+        return txt, [[("Запомнил ▶️", f"r:{rid}")]]
     if k in ("single", "multi", "image"):
         opts = "\n".join(f"<b>{LETTERS[i]}.</b> {esc(o)}" for i, o in enumerate(st["options"]))
         hint = "\n<i>(можно выбрать несколько, затем «Ответить»)</i>" if k == "multi" else ""
@@ -370,7 +372,7 @@ async def on_document(chat_id: int, user: dict, msg: dict):
     await send(chat_id, f"📥 Получил «{esc(doc.get('file_name', 'файл'))}», читаю…")
     try:
         info = await api("getFile", file_id=doc["file_id"])
-        r = await _client.get(f"https://api.telegram.org/file/bot{token()}/{info['file_path']}")
+        r = await _client.get(f"{API_BASE}/file/bot{token()}/{info['file_path']}")
         r.raise_for_status()
         cid, warns = await asyncio.to_thread(service.create_course, user["id"], [(doc.get("file_name") or "file.txt", r.content)], msg.get("caption", ""))
     except ValueError as e:
@@ -432,6 +434,13 @@ async def on_callback(cb: dict):
         elif kind == "n":
             await mark_answered(chat_id, mid, cb, {})
             await send_current(chat_id, user, int(rest[0]))
+        elif kind == "r":  # прочитан шаг-определение: засчитываем и идём дальше
+            rid = int(rest[0])
+            await mark_answered(chat_id, mid, cb, {})
+            run, lesson, state = engine.get_run(user["id"], rid)
+            if not run["finished_at"] and run["step_idx"] < len(engine.all_steps(lesson, state)):
+                await engine.submit(user["id"], rid, {})
+            await send_current(chat_id, user, rid)
         elif kind == "a":
             rid, idx = int(rest[0]), int(rest[1])
             res = await engine.submit(user["id"], rid, {"choice": idx})

@@ -11,6 +11,9 @@ from . import config
 from .db import db
 
 
+TRANSPORT = None  # httpx-транспорт для тестов (MockTransport)
+
+
 class LLMError(Exception):
     pass
 
@@ -67,7 +70,7 @@ class LLM:
             return self._models
         found: list[str] = []
         try:
-            async with httpx.AsyncClient(timeout=20) as c:
+            async with httpx.AsyncClient(timeout=20, transport=TRANSPORT) as c:
                 r = await c.get(f"{config.OPENROUTER_URL}/models")
                 r.raise_for_status()
                 for m in r.json().get("data", []):
@@ -98,7 +101,7 @@ class LLM:
             "X-Title": "LearnQuest",
         }
         timeout = httpx.Timeout(connect=15, read=170, write=30, pool=30)
-        async with httpx.AsyncClient(timeout=timeout) as c:
+        async with httpx.AsyncClient(timeout=timeout, transport=TRANSPORT) as c:
             r = await c.post(f"{config.OPENROUTER_URL}/chat/completions", json=body, headers=headers)
         if r.status_code == 400 and json_mode:
             # часть провайдеров не поддерживает response_format

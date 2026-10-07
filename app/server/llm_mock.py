@@ -76,6 +76,11 @@ def respond(task: str, ctx: dict) -> dict:
         return {"title": fn[:60], "description": "Курс, собранный по загруженным материалам (демо-режим).", "icon": "🧠",
                 "has_practice": True, "practice_kind": "problems", "modules": mods}
 
+    if task == "module_start":
+        plan = respond("module_plan", ctx)
+        qs = respond("intro_test", {**ctx, "terms": plan["terms"]})
+        return {**plan, "questions": qs["questions"]}
+
     if task == "module_plan":
         ts = _terms(ctx["context"], 7)
         if len(ts) < 3:
