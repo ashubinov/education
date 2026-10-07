@@ -51,6 +51,8 @@ def sanitize(svg: str | None) -> str | None:
 
     if not clean(root):
         return None
+    if "font-family" not in root.attrib:  # в <img> нет веб-шрифтов — задаём безопасный
+        root.set("font-family", "Arial, Helvetica, sans-serif")
     # восстановить регистр camelCase-тегов/атрибутов для браузера
     out = ET.tostring(root, encoding="unicode")
     out = re.sub(r"\bxmlns:ns0=", "xmlns=", out)

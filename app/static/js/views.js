@@ -49,8 +49,9 @@ function courseCard(c) {
   if (c.status === 'error') return html`<div class="card course-card" style="border-color:var(--bad)"><div class="row"><div class="course-icon">⚠️</div><h3>${c.title}</h3></div><div class="err small">${c.error}</div>
       <div class="row"><button class="btn sm" data-act="retryCourse" data-id="${c.id}">Повторить</button><button class="btn sm ghost" data-act="deleteCourse" data-id="${c.id}">Удалить</button></div></div>`;
   const g = c.goal;
-  return html`<div class="card course-card" data-act="openCourse" data-id="${c.id}">
-    <div class="row"><div class="course-icon">${c.icon}</div><div class="grow"><h3 class="clamp">${c.title}</h3><div class="muted small clamp">${c.next_title ? 'Далее: ' + c.next_title : c.description}</div></div></div>
+  return html`<div class="card course-card" data-act="learn" data-id="${c.id}">
+    <div class="row"><div class="course-icon">${c.icon}</div><div class="grow"><h3 class="clamp">${c.title}</h3><div class="muted small clamp">${c.next_title ? 'Далее: ' + c.next_title : c.description}</div></div>
+      <button class="icon-btn" data-act="openCourse" data-id="${c.id}" title="Подробнее: путь, цель, статистика курса" style="font-size:18px">📊</button></div>
     <div><div class="row spread small"><b>${c.status === 'completed' ? 'Курс пройден 🏆' : p.percent + '%'}</b><span class="muted">${p.lessons_done} из ~${p.lessons_total} ур.</span></div><div class="bar ${c.status === 'completed' ? 'good' : ''}"><i style="width:${p.percent}%"></i></div></div>
     <div class="row wrap gap-s"><span class="chip accent">⭐ ${c.xp} XP</span>${c.streak.current ? html`<span class="chip warn">🔥 ${c.streak.current}</span>` : ''}${g && g.status === 'ok' ? html`<span class="chip ${g.reached_today ? 'good' : ''}">🎯 ${g.reached_today ? 'на сегодня готово' : '≈' + g.per_day_minutes + ' мин/день'}</span>` : ''}${g && g.status === 'overdue' ? html`<span class="chip warn">⏰ срок прошёл</span>` : ''}</div>
     <button class="btn block" data-act="learn" data-id="${c.id}">${c.status === 'completed' ? 'Повторить' : p.lessons_done ? 'Продолжить' : 'Начать'}</button></div>`;
@@ -87,7 +88,7 @@ function ringSvg(pct, size = 120, color = 'var(--accent)') {
   const r = size / 2 - 10, c = 2 * Math.PI * r;
   return raw(`<svg width="${size}" height="${size}"><circle cx="${size / 2}" cy="${size / 2}" r="${r}" fill="none" stroke="var(--bg3)" stroke-width="12"/><circle cx="${size / 2}" cy="${size / 2}" r="${r}" fill="none" stroke="${color}" stroke-width="12" stroke-linecap="round" stroke-dasharray="${c}" stroke-dashoffset="${c * (1 - pct / 100)}" style="transition:stroke-dashoffset .8s"/></svg>`);
 }
-actions.openCourse = b => { location.hash = '#/course/' + b.dataset.id; };
+actions.openCourse = (b, e) => { e && e.stopPropagation(); location.hash = '#/course/' + b.dataset.id; };
 actions.learn = (b, e) => { e.stopPropagation(); location.hash = '#/learn/' + b.dataset.id; };
 actions.retryCourse = async b => { await api(`/courses/${b.dataset.id}/retry`, { method: 'POST' }).catch(e => toast(e.message)); router(); };
 actions.deleteCourse = async (b, e) => {

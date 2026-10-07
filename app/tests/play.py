@@ -2,6 +2,7 @@
 Использование: LQ_DB=<db> python tests/play.py <логин> <пароль> <course_id> <сколько_уроков> [ошибок_на_урок]
 Верные ответы берутся из БД (серверу они не отдаются), поэтому нужен тот же LQ_DB, что и у сервера."""
 import json
+import os
 import sys
 import time
 
@@ -58,5 +59,7 @@ for i in range(n):
     if nx["state"] != "ready":
         print("stop:", nx)
         break
-    s = solve(nx["lesson_id"], mistakes)
+    s = solve(nx["lesson_id"], int(os.environ.get("MISTAKES_FINAL", mistakes)) if nx["type"] == "final_test" and not os.environ.get("_FAILED_ONCE") else mistakes)
+    if nx["type"] == "final_test":
+        os.environ["_FAILED_ONCE"] = "1"
     print(f"{i + 1}. {nx['type']:<13} {nx['title'][:40]:<40} score={s['score']:.2f} xp+{s['xp_total_gained']} lvl={s['level']['level']} streak={s['streak']['current']}")

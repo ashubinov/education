@@ -31,7 +31,7 @@ PORT = int(os.environ.get("PORT", "8000"))
 DB_PATH = pathlib.Path(os.environ["LQ_DB"]) if os.environ.get("LQ_DB") else DATA / "learnquest.db"
 
 MAX_UPLOAD_MB = 25
-MAX_SOURCE_CHARS = 400_000  # всего текста на один курс
+MAX_SOURCE_CHARS = 250_000  # всего текста на один курс (больше — упрёмся в лимиты бесплатного API)
 CHUNK_CHARS = 3500
 FULL_TEXT_LIMIT = 28_000  # столько текста отправляем в план курса целиком
 MODULE_CONTEXT_CHARS = 9_000

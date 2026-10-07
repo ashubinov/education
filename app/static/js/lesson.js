@@ -90,7 +90,7 @@ async function submitAnswer(payload) {
   const btn = $('#checkbtn'), s = P.v.step;
   if (btn) busy(btn, true, s.kind === 'task' ? 'ИИ проверяет…' : '');
   let res;
-  try { res = await api(`/runs/${P.rid}/answer`, { json: payload }); }
+  try { res = await api(`/runs/${P.rid}/answer`, { json: { ...payload, idx: s.idx } }); }
   catch (e) { P.busy = false; if (btn) busy(btn, false); refreshBtn(); return toast(e.message, { icon: '⚠️' }); }
   P.busy = false; P.answered = true;
   if (res.self_check) return selfCheck(res);

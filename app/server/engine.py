@@ -185,7 +185,18 @@ def _xp_for(step: dict, score: float, state: dict) -> int:
     return int(round(base))
 
 
+_run_locks: dict[int, "asyncio.Lock"] = {}
+
+
 async def submit(user_id: int, run_id: int, payload: dict) -> dict:
+    """Принять ответ на текущий шаг. Параллельные запросы одного прохождения (двойной клик) выстраиваются в очередь."""
+    import asyncio
+    lk = _run_locks.setdefault(run_id, asyncio.Lock())
+    async with lk:
+        return await _submit(user_id, run_id, payload)
+
+
+async def _submit(user_id: int, run_id: int, payload: dict) -> dict:
     run, lesson, state = get_run(user_id, run_id)
     if run["finished_at"]:
         raise ValueError("Урок уже завершён")
@@ -193,6 +204,8 @@ async def submit(user_id: int, run_id: int, payload: dict) -> dict:
     i = run["step_idx"]
     if i >= len(steps):
         raise ValueError("Нет текущего шага")
+    if payload.get("idx") is not None and int(payload["idx"]) != i:
+        raise ValueError("Этот шаг уже пройден — обнови страницу")
     step = steps[i]
     k = step["step"]
     now = time.time()

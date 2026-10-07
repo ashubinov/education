@@ -184,11 +184,10 @@ def extract_json(text: str) -> dict:
         raise ValueError("в ответе нет JSON-объекта")
     t = t[start:end + 1]
     try:
-        return json.loads(t)
+        return json.loads(t, strict=False)  # strict=False: модели часто кладут «живые» переводы строк внутрь строк
     except json.JSONDecodeError:
         t2 = re.sub(r",\s*([}\]])", r"\1", t)  # хвостовые запятые
-        t2 = t2.replace("“", '"').replace("”", '"')
-        return json.loads(t2)
+        return json.loads(t2, strict=False)
 
 
 llm = LLM()

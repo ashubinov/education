@@ -336,15 +336,16 @@ async def build_course(course_id: int):
         if full:
             material = "\n\n".join(f"[#{x['idx']}]\n{x['text']}" for x in chunks)
         else:
-            # map: сжатые конспекты порциями
+            # map: сжатые конспекты порциями по 8 фрагментов; запросы идут по два параллельно (семафор в llm)
             pending = [x for x in chunks if not x["digest"]]
-            batch_size = 4
-            for b in range(0, len(pending), batch_size):
-                batch = pending[b:b + batch_size]
-                course_status(course_id, f"Конспектирую материалы ({min(b + batch_size, len(pending))}/{len(pending)})…")
+            batches = [pending[b:b + 8] for b in range(0, len(pending), 8)]
+            done_n = 0
+
+            async def digest_batch(batch):
+                nonlocal done_n
                 obj = await llm.chat_json(sysmsg, prompts.digest([(x["idx"], x["text"][:3500]) for x in batch]),
                                           task="digest", ctx={"chunks": [(x["idx"], x["text"]) for x in batch]},
-                                          max_tokens=2500)
+                                          max_tokens=4000)
                 got = {int(re.sub(r"\D", "", str(d.get("id")) or "0") or 0): d for d in (obj.get("digests") or []) if isinstance(d, dict)}
                 for x in batch:
                     d = got.get(x["idx"], {})
@@ -352,6 +353,11 @@ async def build_course(course_id: int):
                     if d.get("practice"):
                         dg += " [есть практика]"
                     db.x("UPDATE chunks SET digest=? WHERE course_id=? AND idx=?", (dg or x["text"][:300], course_id, x["idx"]))
+                done_n += 1
+                course_status(course_id, f"Конспектирую материалы ({done_n}/{len(batches)})…")
+
+            course_status(course_id, f"Конспектирую материалы (0/{len(batches)})…")
+            await asyncio.gather(*(digest_batch(b) for b in batches))
             chunks = db.q("SELECT idx, text, digest FROM chunks WHERE course_id=? ORDER BY idx", (course_id,))
             material = "\n".join(f"[#{x['idx']}] {x['digest']}" for x in chunks)
 
