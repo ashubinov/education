@@ -90,10 +90,10 @@ def streak_info(user_id: int, course_id: int | None = None) -> dict:
             "at_risk": cur > 0 and t.isoformat() not in days, "days_total": len(days)}
 
 
-def heatmap(user_id: int, course_id: int | None = None, weeks: int = 26) -> dict:
+def heatmap(user_id: int, course_id: int | None = None, weeks: int = 52) -> dict:
     end = date.today()
-    # выравниваем на воскресенье, чтобы колонки были по неделям (пн–вс)
-    start = end - timedelta(days=weeks * 7 - 1 + end.weekday())
+    # колонки — недели (пн–вс)
+    start = end - timedelta(days=(weeks - 1) * 7 + end.weekday())  # понедельник первой колонки
     args = [user_id, start.isoformat()]
     sql = "SELECT day, SUM(xp) xp, SUM(lessons) lessons, SUM(seconds) seconds, SUM(answers) answers FROM activity WHERE user_id=? AND day>=?"
     if course_id:

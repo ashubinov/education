@@ -33,6 +33,14 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="LearnQuest", lifespan=lifespan)
 
 
+@app.middleware("http")
+async def no_cache(request: Request, call_next):
+    resp = await call_next(request)
+    if request.url.path.startswith("/static") or request.url.path == "/":
+        resp.headers["Cache-Control"] = "no-cache"
+    return resp
+
+
 @app.exception_handler(ValueError)
 async def value_error(_, exc: ValueError):
     return JSONResponse({"detail": str(exc)}, status_code=400)
@@ -434,8 +442,3 @@ app.mount("/static", StaticFiles(directory=str(config.STATIC)), name="static")
 @app.get("/")
 async def index():
     return FileResponse(config.STATIC / "index.html", headers={"Cache-Control": "no-cache"})
-
-
-@app.get("/sw.js")
-async def sw():
-    return FileResponse(config.STATIC / "sw.js", media_type="application/javascript", headers={"Cache-Control": "no-cache"})
