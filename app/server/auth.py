@@ -19,6 +19,9 @@ def _hash(password: str, salt: str) -> str:
 
 
 def register(username: str, password: str, display_name: str = "") -> int:
+    from . import config
+    if config.env("ALLOW_REGISTRATION", "1") in ("0", "false", "no") and db.val("SELECT COUNT(*) FROM users", default=0):
+        raise HTTPException(403, "Регистрация закрыта администратором")
     username = (username or "").strip()
     if not re.fullmatch(r"[\w.\-]{3,32}", username):
         raise HTTPException(400, "Логин: 3–32 символа (буквы, цифры, . _ -)")
