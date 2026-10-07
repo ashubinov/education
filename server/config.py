@@ -3,13 +3,6 @@ import os
 import pathlib
 
 BASE = pathlib.Path(__file__).resolve().parent.parent
-DATA = BASE / "data"
-UPLOADS = DATA / "uploads"
-STATIC = BASE / "static"
-DATA.mkdir(exist_ok=True)
-UPLOADS.mkdir(exist_ok=True)
-
-
 def _load_env() -> None:
     for p in (BASE / ".env", BASE.parent / ".env"):
         if not p.exists():
@@ -26,6 +19,14 @@ def _load_env() -> None:
 
 _load_env()
 
+# Каталог данных: локально ./data, в облаке (Amvera) — постоянная папка /data (DATA_DIR=/data)
+DATA = (pathlib.Path(os.environ["DATA_DIR"]) if os.environ.get("DATA_DIR")
+        else pathlib.Path("/data") if os.environ.get("AMVERA") == "1" else BASE / "data")
+UPLOADS = DATA / "uploads"
+DATA.mkdir(parents=True, exist_ok=True)
+UPLOADS.mkdir(parents=True, exist_ok=True)
+
+FRONT_DIR = pathlib.Path(os.environ["FRONT_DIR"]) if os.environ.get("FRONT_DIR") else BASE / "front"
 HOST = os.environ.get("HOST", "127.0.0.1")
 PORT = int(os.environ.get("PORT", "8000"))
 DB_PATH = pathlib.Path(os.environ["LQ_DB"]) if os.environ.get("LQ_DB") else DATA / "learnquest.db"

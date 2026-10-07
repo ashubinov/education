@@ -96,7 +96,7 @@ async def main():
     tgbot.TRANSPORT = httpx.MockTransport(handler)
     uid = auth.register("tgtester", "secret1", "ТГ")
     db.x("UPDATE users SET tg_link_code='ABCD1234' WHERE id=?", (uid,))
-    text = open(glob.glob("../test_files/*.pdf")[0], "rb").read()
+    text = open(glob.glob("test_files/*.pdf")[0], "rb").read()
     cid, _ = service.create_course(uid, [("lec.pdf", text)], "Тест TG")
     for _ in range(100):
         await asyncio.sleep(0.2)

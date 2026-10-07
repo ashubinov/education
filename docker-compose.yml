@@ -1,0 +1,18 @@
+# Локальный запуск бэкенда в Docker:  docker compose up --build   →  http://localhost:8000/api/health
+# Настройки и ключи берутся из файла .env (см. .env.example). Данные хранятся в томе lq-data.
+services:
+  api:
+    build: .
+    ports:
+      - "8000:80"
+    env_file:
+      - .env
+    environment:
+      DATA_DIR: /data
+      TELEGRAM_ENABLED: "0"   # чтобы контейнер на ПК не конфликтовал с ботом в облаке; поставь "1", если бот нужен здесь
+    volumes:
+      - lq-data:/data
+    restart: unless-stopped
+
+volumes:
+  lq-data:

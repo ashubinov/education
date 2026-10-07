@@ -10,6 +10,7 @@ import httpx
 
 sys.path.insert(0, ".")
 os.environ["OPENROUTER_API_KEY"] = "sk-test"
+os.environ["DEEPSEEK_API_KEY"] = ""
 for k in ("LLM_MOCK", "LLM_BASE_URL", "LLM_API_KEY", "LLM_CUSTOM_MODELS", "LLM_MODELS", "LLM_ALLOW_PAID"):
     os.environ.pop(k, None)
 from server import llm as L  # noqa: E402

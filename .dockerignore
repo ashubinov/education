@@ -1,0 +1,14 @@
+.git
+.venv
+__pycache__
+data
+front
+tests
+scripts
+test_files
+курсы
+.env
+catalog_seed.json
+*.md
+*.bat
+*.vbs

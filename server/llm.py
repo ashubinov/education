@@ -64,6 +64,14 @@ class LLM:
     def api_key(self) -> str:
         return (db.get_setting("openrouter_key") or config.env("OPENROUTER_API_KEY")).strip()
 
+    def deepseek(self) -> dict | None:
+        """DeepSeek напрямую (DEEPSEEK_API_KEY) — первый в цепочке."""
+        key = (db.get_setting("deepseek_key") or config.env("DEEPSEEK_API_KEY")).strip()
+        if not key:
+            return None
+        models = [m.strip() for m in (config.env("DEEPSEEK_MODELS") or "deepseek-chat").split(",") if m.strip()]
+        return {"name": "deepseek", "base": (config.env("DEEPSEEK_BASE_URL") or "https://api.deepseek.com").rstrip("/"), "key": key, "models": models}
+
     def custom(self) -> dict | None:
         base = (db.get_setting("llm_base_url") or config.env("LLM_BASE_URL")).strip().rstrip("/")
         models = [m.strip() for m in (db.get_setting("llm_custom_models") or config.env("LLM_CUSTOM_MODELS")).split(",") if m.strip()]
@@ -75,7 +83,7 @@ class LLM:
         return config.env("LLM_MOCK") == "1" or db.get_setting("llm_mock") == "1"
 
     def configured(self) -> bool:
-        return bool(self.api_key()) or bool(self.custom()) or self.mock()
+        return bool(self.api_key()) or bool(self.custom()) or bool(self.deepseek()) or self.mock()
 
     def paid_allowed(self) -> bool:
         return (db.get_setting("llm_paid") or config.env("LLM_ALLOW_PAID")) in ("1", "true", "yes")
@@ -125,19 +133,20 @@ class LLM:
         return out
 
     async def chain(self) -> list[tuple[str, str]]:
-        """Полная цепочка: [(провайдер, модель), ...]."""
+        """Полная цепочка: [(провайдер, модель), ...]: DeepSeek напрямую → свой провайдер → OpenRouter."""
         out: list[tuple[str, str]] = []
-        cu = self.custom()
-        if cu:
-            out += [("custom", m) for m in cu["models"]]
+        for name, getter in (("deepseek", self.deepseek), ("custom", self.custom)):
+            pv = getter()
+            if pv:
+                out += [(name, m) for m in pv["models"]]
         if self.api_key():
             out += [("openrouter", m) for m in await self.models()]
         return out
 
     def _provider(self, name: str) -> dict:
-        if name == "custom":
-            cu = self.custom()
-            return {"base": cu["base"], "key": cu["key"], "headers": {}}
+        if name in ("custom", "deepseek"):
+            pv = self.custom() if name == "custom" else self.deepseek()
+            return {"base": pv["base"], "key": pv["key"], "headers": {}}
         return {"base": config.OPENROUTER_URL, "key": self.api_key(),
                 "headers": {"HTTP-Referer": "http://localhost:8000", "X-Title": "LearnQuest"}}
 

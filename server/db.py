@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS users(
   last_reminder_day TEXT,
   last_reminder2_day TEXT,
   is_admin INTEGER DEFAULT 0,
+  token_version INTEGER DEFAULT 0,
   created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS sessions(
@@ -48,6 +49,9 @@ CREATE TABLE IF NOT EXISTS courses(
   goal_date TEXT,
   goal_set_at TEXT,
   notes TEXT DEFAULT '',
+  catalog_no INTEGER,
+  origin_id INTEGER,
+  is_template INTEGER DEFAULT 0,
   created_at TEXT DEFAULT CURRENT_TIMESTAMP,
   last_opened TEXT
 );
@@ -155,6 +159,18 @@ class DB:
             self.conn.execute("PRAGMA synchronous=NORMAL")
             self.conn.execute("PRAGMA foreign_keys=OFF")
             self.conn.executescript(SCHEMA)
+            self._migrate()
+
+    def _migrate(self):
+        """Лёгкие миграции для баз, созданных старыми версиями."""
+        def cols(t):
+            return {r[1] for r in self.conn.execute(f"PRAGMA table_info({t})")}
+        for table, col, ddl in (("users", "token_version", "INTEGER DEFAULT 0"), ("courses", "catalog_no", "INTEGER"),
+                                ("courses", "origin_id", "INTEGER"), ("courses", "is_template", "INTEGER DEFAULT 0")):
+            if col not in cols(table):
+                self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
+        self.conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_catalog_no ON courses(catalog_no) WHERE catalog_no IS NOT NULL")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS ix_courses_origin ON courses(user_id, origin_id)")
 
     def q(self, sql, args=()):
         with self.lock:

@@ -24,6 +24,8 @@ BAR = "▁▂▃▄▅▆▇█"
 
 
 def token() -> str:
+    if config.env("TELEGRAM_ENABLED", "1").lower() in ("0", "false", "no"):
+        return ""  # бот выключен (например, на ПК, пока он работает в облаке с тем же токеном)
     return (db.get_setting("telegram_token") or config.env("TELEGRAM_BOT_TOKEN")).strip()
 
 

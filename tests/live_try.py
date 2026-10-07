@@ -13,7 +13,7 @@ from server.llm import LLMError, extract_json, llm  # noqa: E402
 
 async def main(models):
     texts = []
-    for p in sorted(glob.glob("../test_files/*.pdf")):
+    for p in sorted(glob.glob("test_files/*.pdf")):
         texts.append((p.split("/")[-1].split("\\")[-1], ingest.extract_text(p, open(p, "rb").read())))
     chunks = []
     for name, t in texts:

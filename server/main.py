@@ -1,28 +1,45 @@
-"""FastAPI-приложение LearnQuest."""
+"""FastAPI-приложение LearnQuest (бэкенд). Фронтенд — отдельный репозиторий (education-front, GitHub Pages)."""
 import asyncio
-import re
+import json
 import secrets
 from contextlib import asynccontextmanager
-from datetime import date, datetime
+from datetime import date
 
-from fastapi import Body, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import Body, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
-from . import auth, config, engine, generator, notifier, service, tgbot
+from . import auth, catalog, config, engine, generator, notifier, service, supplement, tgbot
 from . import gamification as gm
 from .db import db, jd, jl
-from .llm import LLMError, llm
+from .llm import llm
+from .schemas import AnswerIn, GoalIn, LoginIn, MeUpdate, PublishIn, RegisterIn, SettingsUpdate, StartIn
+
+MAX_REQUEST_MB = 80
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     generator.set_loop(asyncio.get_running_loop())
+    catalog.system_user_id()
     # восстановление после перезапуска
     db.x("UPDATE lessons SET status='pending' WHERE status='generating'")
     for c in db.q("SELECT id FROM courses WHERE status='processing'"):
-        generator.spawn(generator.build_course(c["id"]))
+        if db.val("SELECT COUNT(*) FROM modules WHERE course_id=?", (c["id"],), 0):
+            db.x("UPDATE courses SET status='ready', status_text='' WHERE id=?", (c["id"],))  # прервалось дополнение курса
+        else:
+            generator.spawn(generator.build_course(c["id"]))
+    # готовые курсы: если каталог пуст и рядом лежит catalog_seed.json — загружаем (удобно для первого запуска в облаке)
+    seed = config.DATA / "catalog_seed.json"
+    if seed.exists() and not db.val("SELECT COUNT(*) FROM courses WHERE is_template=1", default=0):
+        try:
+            res = catalog.import_all(json.loads(seed.read_text(encoding="utf-8")))
+            print("Каталог загружен из catalog_seed.json:", res)
+        except Exception as e:
+            print("Не удалось загрузить catalog_seed.json:", e)
     tgbot.start()
     notifier.start()
     yield
@@ -30,15 +47,36 @@ async def lifespan(app: FastAPI):
     await notifier.stop()
 
 
-app = FastAPI(title="LearnQuest", lifespan=lifespan)
+app = FastAPI(title="LearnQuest API", lifespan=lifespan, docs_url="/api/docs", redoc_url=None, openapi_url="/api/openapi.json")
+
+# ---------- CORS: фронт на GitHub Pages ходит на этот бэкенд с другого домена; авторизация — Bearer-токеном, куки не нужны ----------
+_local = [f"http://127.0.0.1:{config.PORT}", f"http://localhost:{config.PORT}"]
+_origins = [o.strip().rstrip("/") for o in config.env("CORS_ORIGINS").split(",") if o.strip()]
+app.add_middleware(CORSMiddleware, allow_origins=_origins + _local, allow_credentials=False,
+                   allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"], allow_headers=["Authorization", "Content-Type"], max_age=600)
 
 
 @app.middleware("http")
-async def no_cache(request: Request, call_next):
+async def security(request: Request, call_next):
+    cl = request.headers.get("content-length")
+    if cl and cl.isdigit() and int(cl) > MAX_REQUEST_MB * 1024 * 1024:
+        return JSONResponse({"detail": f"Запрос больше {MAX_REQUEST_MB} МБ"}, status_code=413)
     resp = await call_next(request)
-    if request.url.path.startswith("/static") or request.url.path == "/":
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("Referrer-Policy", "no-referrer")
+    resp.headers.setdefault("X-Frame-Options", "DENY")
+    if not request.url.path.startswith("/api/"):
         resp.headers["Cache-Control"] = "no-cache"
     return resp
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error(_, exc: RequestValidationError):
+    """Понятное сообщение вместо технического 422."""
+    first = exc.errors()[0] if exc.errors() else {}
+    field = ".".join(str(x) for x in first.get("loc", []) if x not in ("body", "query", "path"))
+    msg = first.get("msg", "неверные данные")
+    return JSONResponse({"detail": f"Некорректные данные{' (' + field + ')' if field else ''}: {msg}"}, status_code=422)
 
 
 @app.exception_handler(ValueError)
@@ -55,6 +93,13 @@ def me(request: Request) -> dict:
     return auth.require_user(request)
 
 
+def admin(request: Request) -> dict:
+    u = auth.require_user(request)
+    if not u["is_admin"]:
+        raise HTTPException(403, "Только для администратора")
+    return u
+
+
 def own_course(user: dict, course_id: int) -> dict:
     c = db.one("SELECT * FROM courses WHERE id=? AND user_id=?", (course_id, user["id"]))
     if not c:
@@ -62,7 +107,7 @@ def own_course(user: dict, course_id: int) -> dict:
     return c
 
 
-# =============================================================== профиль
+# =============================================================== профиль и вход
 def user_public(u: dict) -> dict:
     xp = gm.total_xp(u["id"])
     return {
@@ -73,66 +118,41 @@ def user_public(u: dict) -> dict:
     }
 
 
-def _set_cookie(resp: Response, token: str):
-    resp.set_cookie(auth.COOKIE, token, max_age=auth.SESSION_TTL, httponly=True, samesite="lax", path="/")
+def _session(uid: int) -> dict:
+    return {"token": auth.make_token(uid), "user": user_public(db.one("SELECT * FROM users WHERE id=?", (uid,)))}
 
 
 @app.post("/api/auth/register")
-async def register(response: Response, body: dict = Body(...)):
-    uid = await run_in_threadpool(auth.register, body.get("username"), body.get("password"), body.get("display_name", ""))
-    _set_cookie(response, auth.new_session(uid))
-    return user_public(db.one("SELECT * FROM users WHERE id=?", (uid,)))
+async def register(request: Request, body: RegisterIn):
+    uid = await run_in_threadpool(auth.register, body.username, body.password, body.display_name, auth.client_ip(request))
+    return _session(uid)
 
 
 @app.post("/api/auth/login")
-async def login(request: Request, response: Response, body: dict = Body(...)):
-    ip = request.client.host if request.client else ""
-    uid = await run_in_threadpool(auth.login, body.get("username"), body.get("password"), ip)
-    _set_cookie(response, auth.new_session(uid))
-    return user_public(db.one("SELECT * FROM users WHERE id=?", (uid,)))
+async def login(request: Request, body: LoginIn):
+    uid = await run_in_threadpool(auth.login, body.username, body.password, auth.client_ip(request))
+    return _session(uid)
 
 
-@app.post("/api/auth/logout")
-async def logout(request: Request, response: Response):
-    t = request.cookies.get(auth.COOKIE)
-    if t:
-        auth.drop_session(t)
-    response.delete_cookie(auth.COOKIE, path="/")
+@app.post("/api/auth/logout-all")
+async def logout_all(request: Request):
+    """Выйти на всех устройствах: все выданные токены перестают действовать."""
+    auth.revoke_all(me(request)["id"])
     return {"ok": True}
 
 
 @app.get("/api/me")
 async def get_me(request: Request):
-    u = auth.user_from_request(request)
-    if not u:
-        raise HTTPException(401, "Нужно войти")
-    return user_public(u)
+    return user_public(me(request))
 
 
 @app.put("/api/me")
-async def update_me(request: Request, body: dict = Body(...)):
+async def update_me(request: Request, body: MeUpdate):
     u = me(request)
-    fields = {}
-    if "display_name" in body:
-        fields["display_name"] = str(body["display_name"]).strip()[:40] or u["username"]
-    if "avatar" in body:
-        fields["avatar"] = str(body["avatar"])[:8]
-    if "theme_color" in body:
-        if not re.fullmatch(r"#[0-9a-fA-F]{6}", str(body["theme_color"])):
-            raise HTTPException(400, "Цвет в формате #rrggbb")
-        fields["theme_color"] = body["theme_color"]
-    if "theme_mode" in body:
-        if body["theme_mode"] not in ("dark", "light", "auto"):
-            raise HTTPException(400, "Режим: dark/light/auto")
-        fields["theme_mode"] = body["theme_mode"]
-    if "sound" in body:
-        fields["sound"] = int(bool(body["sound"]))
-    if "reminders_on" in body:
-        fields["reminders_on"] = int(bool(body["reminders_on"]))
-    if "reminder_time" in body:
-        if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", str(body["reminder_time"])):
-            raise HTTPException(400, "Время в формате ЧЧ:ММ")
-        fields["reminder_time"] = body["reminder_time"]
+    fields = body.model_dump(exclude_none=True)
+    for k in ("sound", "reminders_on"):
+        if k in fields:
+            fields[k] = int(fields[k])
     if fields:
         sets = ", ".join(f"{k}=?" for k in fields)
         db.x(f"UPDATE users SET {sets} WHERE id=?", (*fields.values(), u["id"]))
@@ -147,35 +167,35 @@ def _hint(key: str) -> str:
 @app.get("/api/settings")
 async def get_settings(request: Request):
     u = me(request)
-    cu = llm.custom()
+    cu, ds = llm.custom(), llm.deepseek()
     out = {"is_admin": bool(u["is_admin"]), "telegram": {"bot": tgbot.bot_username(), "configured": bool(tgbot.token())},
            "llm": {"configured": llm.configured(), "mock": llm.mock(), "last_model": llm.last_model,
-                   "openrouter": bool(llm.api_key()), "paid": llm.paid_allowed(), "models": llm.forced_models(),
+                   "openrouter": bool(llm.api_key()), "deepseek": bool(ds), "paid": llm.paid_allowed(), "models": llm.forced_models(),
                    "custom": {"base": cu["base"], "models": cu["models"], "key_set": bool(cu["key"])} if cu else None}}
     if u["is_admin"]:
         out["llm"]["key_hint"] = _hint(llm.api_key())
+        out["llm"]["deepseek_hint"] = _hint(ds["key"]) if ds else ""
         try:
-            out["llm"]["chain"] = [f"{m}" if p == "openrouter" else f"{m} (свой API)" for p, m in await llm.chain()][:8]
+            names = {"deepseek": "DeepSeek", "custom": "свой API", "openrouter": "OpenRouter"}
+            out["llm"]["chain"] = [f"{m} ({names[p]})" for p, m in await llm.chain()][:8]
         except Exception:
             out["llm"]["chain"] = []
     return out
 
 
 @app.put("/api/settings")
-async def put_settings(request: Request, body: dict = Body(...)):
-    u = me(request)
-    if not u["is_admin"]:
-        raise HTTPException(403, "Только администратор (первый зарегистрированный пользователь)")
-    for key, setting in (("openrouter_key", "openrouter_key"), ("llm_base_url", "llm_base_url"), ("llm_api_key", "llm_api_key"),
-                         ("llm_custom_models", "llm_custom_models"), ("llm_models", "llm_models")):
-        if key in body:
-            db.set_setting(setting, str(body[key]).strip())
-    if "llm_paid" in body:
-        db.set_setting("llm_paid", "1" if body["llm_paid"] else "0")
-    if any(k in body for k in ("llm_models", "llm_paid", "openrouter_key", "llm_base_url", "llm_custom_models")):
+async def put_settings(request: Request, body: SettingsUpdate):
+    admin(request)
+    data = body.model_dump(exclude_none=True)
+    for key in ("openrouter_key", "deepseek_key", "llm_base_url", "llm_api_key", "llm_custom_models", "llm_models"):
+        if key in data:
+            db.set_setting(key, data[key].strip())
+    if "llm_paid" in data:
+        db.set_setting("llm_paid", "1" if data["llm_paid"] else "0")
+    if any(k in data for k in ("llm_models", "llm_paid", "openrouter_key", "deepseek_key", "llm_base_url", "llm_custom_models")):
         llm.reset_cache()
-    if "telegram_token" in body:
-        db.set_setting("telegram_token", str(body["telegram_token"]).strip())
+    if "telegram_token" in data:
+        db.set_setting("telegram_token", data["telegram_token"].strip())
         await tgbot.restart()
     return await get_settings(request)
 
@@ -201,26 +221,40 @@ def course_progress(c: dict) -> dict:
 
 def course_card(c: dict, user: dict) -> dict:
     nl = generator.next_lesson(c["id"]) if c["status"] in ("ready", "completed") else None
+    origin_no = db.val("SELECT catalog_no FROM courses WHERE id=?", (c["origin_id"],)) if c.get("origin_id") else None
     return {"id": c["id"], "title": c["title"], "description": c["description"], "icon": c["icon"], "status": c["status"],
-            "status_text": c["status_text"], "error": c["error"], "progress": course_progress(c),
+            "status_text": c["status_text"], "error": c["error"] if c["status"] != "ready" else None, "progress": course_progress(c),
             "xp": gm.total_xp(user["id"], c["id"]), "streak": gm.streak_info(user["id"], c["id"]),
             "goal": gm.goal_info(c, user["id"]), "next_title": nl["title"] if nl else None,
-            "has_practice": bool(c["has_practice"]), "created_at": c["created_at"]}
+            "has_practice": bool(c["has_practice"]), "created_at": c["created_at"], "catalog_no": origin_no}
 
 
 @app.get("/api/courses")
 async def list_courses(request: Request):
     u = me(request)
-    rows = db.q("SELECT * FROM courses WHERE user_id=? ORDER BY COALESCE(last_opened, created_at) DESC", (u["id"],))
+    rows = db.q("SELECT * FROM courses WHERE user_id=? AND is_template=0 ORDER BY COALESCE(last_opened, created_at) DESC", (u["id"],))
     return [course_card(c, u) for c in rows]
 
 
 @app.post("/api/courses")
-async def create_course(request: Request, files: list[UploadFile] = File(...), title: str = Form("")):
+async def create_course(request: Request, files: list[UploadFile] = File(..., max_length=20), title: str = Form("", max_length=100)):
     u = me(request)
     blobs = [(f.filename or "file.txt", await f.read()) for f in files]
     cid, warnings = await run_in_threadpool(service.create_course, u["id"], blobs, title)
     return {"id": cid, "warnings": warnings}
+
+
+@app.post("/api/courses/{cid}/supplement")
+async def supplement_endpoint(cid: int, request: Request, files: list[UploadFile] = File(..., max_length=20)):
+    """Дополнить курс новыми материалами: по ним ИИ добавит новые модули в конец."""
+    u = me(request)
+    c = own_course(u, cid)
+    if c["status"] not in ("ready", "completed"):
+        raise HTTPException(409, "Курс сейчас обрабатывается — дождитесь окончания")
+    blobs = [(f.filename or "file.txt", await f.read()) for f in files]
+    ids, warnings = await run_in_threadpool(service.add_sources, u["id"], cid, blobs)
+    generator.spawn(supplement.supplement_course(cid, ids))
+    return {"ok": True, "warnings": warnings}
 
 
 @app.get("/api/courses/{cid}")
@@ -251,6 +285,9 @@ async def course_detail(cid: int, request: Request):
     card["notes"] = c["notes"]
     card["week"] = gm.week(u["id"], cid)
     card["lessons_done_total"] = db.val("SELECT COUNT(*) FROM lessons WHERE course_id=? AND status='done'", (cid,), 0)
+    if c["status"] == "ready" and c["error"]:  # ошибка неудавшегося дополнения показывается один раз
+        card["supplement_error"] = c["error"]
+        db.x("UPDATE courses SET error=NULL WHERE id=?", (cid,))
     return card
 
 
@@ -259,12 +296,10 @@ async def delete_course(cid: int, request: Request):
     u = me(request)
     own_course(u, cid)
     with db.tx():
-        for t in ("sources", "chunks", "modules", "lessons", "answers", "activity"):
-            if t == "activity":
-                db.x("DELETE FROM activity WHERE course_id=? AND user_id=?", (cid, u["id"]))
-            else:
-                db.x(f"DELETE FROM {t} WHERE course_id=?", (cid,))
-        db.x("DELETE FROM runs WHERE lesson_id NOT IN (SELECT id FROM lessons)")
+        db.x("DELETE FROM runs WHERE lesson_id IN (SELECT id FROM lessons WHERE course_id=?)", (cid,))
+        for t in ("sources", "chunks", "modules", "lessons", "answers"):
+            db.x(f"DELETE FROM {t} WHERE course_id=?", (cid,))
+        db.x("DELETE FROM activity WHERE course_id=? AND user_id=?", (cid, u["id"]))
         db.x("DELETE FROM courses WHERE id=?", (cid,))
     return {"ok": True}
 
@@ -280,23 +315,39 @@ async def retry_course(cid: int, request: Request):
     return {"ok": True}
 
 
-@app.put("/api/courses/{cid}/goal")
-async def set_goal(cid: int, request: Request, body: dict = Body(...)):
+@app.post("/api/courses/{cid}/restart")
+async def restart_course(cid: int, request: Request):
+    """Повторение курса: прогресс сбрасывается, XP/серия/достижения остаются."""
     u = me(request)
     c = own_course(u, cid)
-    gd = body.get("date")
-    if gd:
-        try:
-            d = date.fromisoformat(gd)
-        except ValueError:
-            raise HTTPException(400, "Дата в формате ГГГГ-ММ-ДД")
-        if d < date.today():
+    if c["status"] not in ("ready", "completed"):
+        raise HTTPException(409, "Курс сейчас обрабатывается")
+    catalog.restart_course(cid)
+    return {"ok": True}
+
+
+@app.put("/api/courses/{cid}/goal")
+async def set_goal(cid: int, request: Request, body: GoalIn):
+    u = me(request)
+    own_course(u, cid)
+    if body.date:
+        if body.date < date.today():
             raise HTTPException(400, "Срок не может быть в прошлом")
-        db.x("UPDATE courses SET goal_date=?, goal_set_at=? WHERE id=?", (gd, gm.today(), cid))
+        db.x("UPDATE courses SET goal_date=?, goal_set_at=? WHERE id=?", (body.date.isoformat(), gm.today(), cid))
     else:
         db.x("UPDATE courses SET goal_date=NULL WHERE id=?", (cid,))
     gm.check_achievements(u["id"])
     return gm.goal_info(db.one("SELECT * FROM courses WHERE id=?", (cid,)), u["id"])
+
+
+@app.post("/api/courses/{cid}/publish")
+async def publish_course(cid: int, request: Request, body: PublishIn = Body(default=PublishIn())):
+    """Администратор: сделать копию курса общедоступной в каталоге (получит номер)."""
+    u = admin(request)
+    c = own_course(u, cid)
+    if c["status"] not in ("ready", "completed"):
+        raise HTTPException(409, "Курс ещё не готов")
+    return {"number": await run_in_threadpool(catalog.publish, cid, body.title)}
 
 
 @app.get("/api/courses/{cid}/next")
@@ -335,6 +386,48 @@ async def course_next(cid: int, request: Request, retry: int = 0):
     return {"state": "generating", "lesson_id": l["id"], "title": l["title"], "type": l["type"]}
 
 
+# =============================================================== каталог готовых курсов
+@app.get("/api/catalog")
+async def catalog_list(request: Request):
+    u = me(request)
+    return catalog.list_catalog(u["id"])
+
+
+@app.get("/api/catalog/{number}")
+async def catalog_get(number: int, request: Request):
+    u = me(request)
+    c = catalog.find(number)
+    if not c:
+        raise HTTPException(404, f"Курс с номером {number} не найден")
+    return catalog._card(c, u["id"])
+
+
+@app.post("/api/catalog/{number}/add")
+async def catalog_add(number: int, request: Request):
+    u = me(request)
+    res = await run_in_threadpool(catalog.add_to_user, number, u["id"])
+    gm.check_achievements(u["id"])
+    return res
+
+
+@app.get("/api/admin/catalog/export")
+async def catalog_export(request: Request):
+    admin(request)
+    data = await run_in_threadpool(catalog.export_all)
+    return Response(json.dumps(data, ensure_ascii=False), media_type="application/json",
+                    headers={"Content-Disposition": "attachment; filename=catalog_seed.json"})
+
+
+@app.post("/api/admin/catalog/import")
+async def catalog_import(request: Request, file: UploadFile = File(...)):
+    admin(request)
+    try:
+        data = json.loads((await file.read()).decode("utf-8"))
+    except Exception:
+        raise HTTPException(400, "Это не JSON-файл каталога")
+    return await run_in_threadpool(catalog.import_all, data)
+
+
 # =============================================================== уроки и запуски
 def _own_lesson(user: dict, lesson_id: int) -> dict:
     l = db.one("SELECT l.* FROM lessons l JOIN courses c ON c.id=l.course_id WHERE l.id=? AND c.user_id=?", (lesson_id, user["id"]))
@@ -344,12 +437,12 @@ def _own_lesson(user: dict, lesson_id: int) -> dict:
 
 
 @app.post("/api/lessons/{lid}/start")
-async def start_lesson(lid: int, request: Request, body: dict = Body(default={})):
+async def start_lesson(lid: int, request: Request, body: StartIn = Body(default=StartIn())):
     u = me(request)
     l = _own_lesson(u, lid)
     if l["status"] not in ("ready", "done"):
         raise HTTPException(409, "Урок ещё готовится")
-    run = engine.start_run(u["id"], l, restart=bool(body.get("restart")))
+    run = engine.start_run(u["id"], l, restart=body.restart)
     generator.spawn(generator.prefetch(l["course_id"]))
     run, lesson, state = engine.get_run(u["id"], run["id"])
     return engine.run_view(run, lesson, state)
@@ -366,9 +459,9 @@ async def get_run(rid: int, request: Request):
 
 
 @app.post("/api/runs/{rid}/answer")
-async def answer(rid: int, request: Request, body: dict = Body(...)):
+async def answer(rid: int, request: Request, body: AnswerIn):
     u = me(request)
-    res = await engine.submit(u["id"], rid, body)
+    res = await engine.submit(u["id"], rid, body.to_payload())
     run, lesson, state = engine.get_run(u["id"], rid)
     res["next"] = engine.run_view(run, lesson, state)
     return res
@@ -398,6 +491,8 @@ async def stats(request: Request, course_id: int | None = None):
     u = me(request)
     if course_id:
         own_course(u, course_id)
+    w = " AND course_id=?" if course_id else ""
+    a = (u["id"], course_id) if course_id else (u["id"],)
     return {
         "level": gm.level_info(gm.total_xp(u["id"])),
         "streak": gm.streak_info(u["id"], course_id),
@@ -405,23 +500,19 @@ async def stats(request: Request, course_id: int | None = None):
         "week": gm.week(u["id"], course_id),
         "achievements": gm.achievements_list(u["id"]),
         "totals": {
-            "lessons": db.val("SELECT SUM(lessons) FROM activity WHERE user_id=?" + (" AND course_id=?" if course_id else ""),
-                              (u["id"], course_id) if course_id else (u["id"],), 0) or 0,
-            "minutes": round((db.val("SELECT SUM(seconds) FROM activity WHERE user_id=?" + (" AND course_id=?" if course_id else ""),
-                                     (u["id"], course_id) if course_id else (u["id"],), 0) or 0) / 60),
+            "lessons": db.val("SELECT SUM(lessons) FROM activity WHERE user_id=?" + w, a, 0) or 0,
+            "minutes": round((db.val("SELECT SUM(seconds) FROM activity WHERE user_id=?" + w, a, 0) or 0) / 60),
             "xp": gm.total_xp(u["id"], course_id),
-            "answers": db.val("SELECT SUM(answers) FROM activity WHERE user_id=?" + (" AND course_id=?" if course_id else ""),
-                              (u["id"], course_id) if course_id else (u["id"],), 0) or 0,
+            "answers": db.val("SELECT SUM(answers) FROM activity WHERE user_id=?" + w, a, 0) or 0,
         },
         "courses": [{"id": c["id"], "title": c["title"], "icon": c["icon"], "xp": gm.total_xp(u["id"], c["id"])}
-                    for c in db.q("SELECT id, title, icon FROM courses WHERE user_id=?", (u["id"],))],
+                    for c in db.q("SELECT id, title, icon FROM courses WHERE user_id=? AND is_template=0", (u["id"],))],
     }
 
 
 @app.get("/api/reminder")
 async def reminder(request: Request):
-    u = me(request)
-    return notifier.web_reminder(u)
+    return notifier.web_reminder(me(request))
 
 
 # =============================================================== Telegram
@@ -454,10 +545,16 @@ async def health():
     return {"ok": True, "llm": llm.configured(), "telegram": bool(tgbot.token())}
 
 
-# =============================================================== статика
-app.mount("/static", StaticFiles(directory=str(config.STATIC)), name="static")
+# =============================================================== фронтенд (только для локального запуска, если рядом лежит папка front/)
+_front = config.FRONT_DIR
+if (_front / "index.html").exists():
+    @app.get("/config.js")
+    async def local_config():
+        # на локальном запуске фронт и бэкенд на одном адресе — префикс API не нужен
+        return PlainTextResponse('window.LQ_API = "";\n', media_type="application/javascript", headers={"Cache-Control": "no-cache"})
 
-
-@app.get("/")
-async def index():
-    return FileResponse(config.STATIC / "index.html", headers={"Cache-Control": "no-cache"})
+    app.mount("/", StaticFiles(directory=str(_front), html=True), name="front")
+else:
+    @app.get("/")
+    async def root():
+        return {"service": "LearnQuest API", "docs": "/api/docs", "health": "/api/health"}
