@@ -16,7 +16,7 @@ from . import auth, catalog, config, engine, generator, notifier, service, suppl
 from . import gamification as gm
 from .db import db, jd, jl
 from .llm import llm
-from .schemas import AnswerIn, GoalIn, LoginIn, MeUpdate, PublishIn, RegisterIn, SettingsUpdate, StartIn
+from .schemas import AnswerIn, GoalIn, LoginIn, MeUpdate, PasswordChangeIn, PublishIn, RegisterIn, SettingsUpdate, StartIn
 
 MAX_REQUEST_MB = 80
 
@@ -142,6 +142,14 @@ async def logout_all(request: Request):
     """Выйти на всех устройствах: все выданные токены перестают действовать."""
     auth.revoke_all(me(request)["id"])
     return {"ok": True}
+
+
+@app.post("/api/me/password")
+async def change_password(request: Request, body: PasswordChangeIn):
+    """Смена пароля. Другие устройства выходят из аккаунта; текущему возвращается свежий токен."""
+    u = me(request)
+    await run_in_threadpool(auth.change_password, u["id"], body.current_password, body.new_password, auth.client_ip(request))
+    return {"token": auth.make_token(u["id"]), "ok": True}
 
 
 @app.get("/api/me")

@@ -190,3 +190,19 @@ assert friend.get("/api/me").status_code == 401
 assert ok(anon.post("/api/auth/login", json={"username": u + "f", "password": "secret1"}))["token"]
 print("OK: logout-all отзывает токены")
 print("ALL OK")
+
+# ---------- 8. смена пароля ----------
+pw = anon.post("/api/auth/register", json={"username": u + "p", "password": "oldsecret1"}).json()
+pc = client(pw["token"])
+other = client(ok(anon.post("/api/auth/login", json={"username": u + "p", "password": "oldsecret1"}))["token"])  # «второе устройство»
+assert pc.post("/api/me/password", json={"current_password": "wrong", "new_password": "newsecret2"}).status_code == 400
+assert pc.post("/api/me/password", json={"current_password": "oldsecret1", "new_password": "oldsecret1"}).status_code == 400
+assert pc.post("/api/me/password", json={"current_password": "oldsecret1", "new_password": "123"}).status_code == 422
+new_tok = ok(pc.post("/api/me/password", json={"current_password": "oldsecret1", "new_password": "newsecret2"}))["token"]
+assert client(new_tok).get("/api/me").status_code == 200              # текущее устройство продолжает работать
+assert pc.get("/api/me").status_code == 401 and other.get("/api/me").status_code == 401   # старые токены отозваны
+assert anon.post("/api/auth/login", json={"username": u + "p", "password": "oldsecret1"}).status_code == 400
+assert ok(anon.post("/api/auth/login", json={"username": u + "p", "password": "newsecret2"}))["token"]
+assert anon.post("/api/me/password", json={"current_password": "a", "new_password": "bcdefgh"}).status_code == 401
+print("OK: смена пароля (проверка текущего, отзыв старых токенов, вход по новому)")
+print("ALL OK (пароль)")

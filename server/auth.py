@@ -89,6 +89,18 @@ def login(username: str, password: str, ip: str = "") -> int:
     return u["id"]
 
 
+def change_password(user_id: int, current: str, new: str, ip: str = ""):
+    """Сменить пароль: проверяет текущий, обновляет соль и хеш, отзывает все прежние токены (вход на других устройствах)."""
+    u = db.one("SELECT * FROM users WHERE id=?", (user_id,))
+    _throttle(_attempts, f"pwd|{user_id}|{ip}", 8, 300, "Слишком много попыток. Подождите пару минут.")
+    if not u or not hmac.compare_digest(_hash(current, u["salt"]), u["pass_hash"]):
+        raise HTTPException(400, "Текущий пароль неверный")
+    if hmac.compare_digest(current.encode(), new.encode()):
+        raise HTTPException(400, "Новый пароль должен отличаться от текущего")
+    salt = secrets.token_hex(16)
+    db.x("UPDATE users SET pass_hash=?, salt=?, token_version=COALESCE(token_version,0)+1 WHERE id=?", (_hash(new, salt), salt, user_id))
+
+
 def make_token(user_id: int) -> str:
     u = db.one("SELECT token_version FROM users WHERE id=?", (user_id,))
     now = int(time.time())
