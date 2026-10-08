@@ -152,21 +152,38 @@ def restart_course(course_id: int):
         db.x("UPDATE courses SET status='ready', status_text='', error=NULL WHERE id=?", (course_id,))
 
 
+# ----------------------------------------------------------------------- удаление курса
+def delete_course(course_id: int):
+    """Удалить курс со всем содержимым (уроки, ответы, запуски)."""
+    with db.tx():
+        db.x("DELETE FROM runs WHERE lesson_id IN (SELECT id FROM lessons WHERE course_id=?)", (course_id,))
+        for t in ("sources", "chunks", "modules", "lessons", "answers", "activity"):
+            db.x(f"DELETE FROM {t} WHERE course_id=?", (course_id,))
+        db.x("DELETE FROM courses WHERE id=?", (course_id,))
+
+
 # ----------------------------------------------------------------------- экспорт / импорт
 def export_all() -> dict:
     return {"version": 1, "courses": [dict(read_tree(c["id"]), catalog_no=c["catalog_no"]) for c in
                                       db.q("SELECT id, catalog_no FROM courses WHERE is_template=1 ORDER BY catalog_no")]}
 
 
-def import_all(data: dict) -> dict:
-    """Добавить курсы из экспорта. Номера, которые уже есть в каталоге, пропускаются."""
-    added, skipped = [], []
+def import_all(data: dict, replace: bool = False) -> dict:
+    """Добавить курсы из экспорта. Если номер уже есть: пропустить (replace=False) или заменить курс (replace=True)."""
+    added, skipped, replaced = [], [], []
     sysid = system_user_id()
     for t in data.get("courses", []):
         no = t.get("catalog_no")
-        if not isinstance(no, int) or find(no):
+        if not isinstance(no, int):
             skipped.append(no)
             continue
+        old = find(no)
+        if old and not replace:
+            skipped.append(no)
+            continue
+        if old:
+            delete_course(old["id"])
+            replaced.append(no)
         write_tree(t, sysid, template=True, catalog_no=no)
         added.append(no)
-    return {"added": added, "skipped": skipped}
+    return {"added": added, "skipped": skipped, "replaced": replaced}

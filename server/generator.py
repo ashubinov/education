@@ -89,7 +89,8 @@ def weak_concepts(user_id: int, course_id: int, module_terms: list[str] | None =
 
 
 # ======================================================================= контекст модуля
-def module_context(module: dict, course_id: int, limit: int = config.MODULE_CONTEXT_CHARS) -> str:
+def module_context(module: dict, course_id: int, limit: int | None = None) -> str:
+    limit = limit or config.MODULE_CONTEXT_CHARS
     ids = jl(module.get("chunk_ids"), []) or []
     chunks = db.q("SELECT idx, text FROM chunks WHERE course_id=? ORDER BY idx", (course_id,))
     by_idx = {c["idx"]: c["text"] for c in chunks}

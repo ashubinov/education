@@ -7,6 +7,7 @@
 """
 import asyncio
 import json
+import pathlib
 import re
 import time
 
@@ -28,6 +29,10 @@ class LLMUnavailable(LLMError):
 
 class _AuthError(LLMError):
     pass
+
+
+class ManualNeeded(LLMUnavailable):
+    """Ручной режим (LLM_MANUAL_DIR): для этого запроса ещё нет файла-ответа. Промпт сохранён рядом."""
 
 
 # ---- ранжирование бесплатных моделей OpenRouter ----
@@ -82,8 +87,12 @@ class LLM:
     def mock(self) -> bool:
         return config.env("LLM_MOCK") == "1" or db.get_setting("llm_mock") == "1"
 
+    def manual_dir(self):
+        d = config.env("LLM_MANUAL_DIR")
+        return pathlib.Path(d) if d else None
+
     def configured(self) -> bool:
-        return bool(self.api_key()) or bool(self.custom()) or bool(self.deepseek()) or self.mock()
+        return self.manual_dir() is not None or bool(self.api_key()) or bool(self.custom()) or bool(self.deepseek()) or self.mock()
 
     def paid_allowed(self) -> bool:
         return (db.get_setting("llm_paid") or config.env("LLM_ALLOW_PAID")) in ("1", "true", "yes")
@@ -188,6 +197,9 @@ class LLM:
     async def chat_json(self, system: str, user: str, *, task: str, ctx: dict | None = None,
                         validate=None, max_tokens: int = 4500, temperature: float = 0.35) -> dict:
         """Запросить JSON. validate(obj) -> obj | ValueError. Перебирает цепочку моделей, просит исправить формат."""
+        md = self.manual_dir()
+        if md:
+            return self._manual(md, system, user, task, ctx or {}, validate)
         if self.mock():
             from . import llm_mock
             await asyncio.sleep(0.15)
@@ -242,6 +254,26 @@ class LLM:
         if auth_only and isinstance(last_err, _AuthError):
             raise LLMUnavailable(f"Ключ API отклонён: {last_err}. Проверьте ключ в настройках.")
         raise LLMError(f"Не удалось получить ответ модели: {last_err}")
+
+
+def _manual(self, md, system: str, user: str, task: str, ctx: dict, validate):
+    """Ручной режим: ответ на промпт даёт человек/ассистент файлом <ключ>.json в каталоге LLM_MANUAL_DIR.
+    Промпт (ровно тот, что ушёл бы модели) сохраняется в <ключ>.prompt.txt. Ответ проходит те же проверки, что и ответ модели."""
+    md.mkdir(parents=True, exist_ok=True)
+    m = ctx.get("module") or {}
+    key = task if task == "outline" else f"{task}__m{m.get('idx', 0)}"
+    ans = md / f"{key}.json"
+    if not ans.exists():
+        (md / f"{key}.prompt.txt").write_text(f"=== SYSTEM ===\n{system}\n\n=== USER ===\n{user}\n", encoding="utf-8")
+        raise ManualNeeded(f"MANUAL:{key}")
+    try:
+        obj = extract_json(ans.read_text(encoding="utf-8"))
+        return validate(obj) if validate else obj
+    except (ValueError, KeyError, TypeError) as e:
+        raise LLMError(f"MANUAL-INVALID:{key}: {e}")
+
+
+LLM._manual = _manual
 
 
 def extract_json(text: str) -> dict:

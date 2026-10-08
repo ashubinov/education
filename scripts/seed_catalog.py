@@ -19,35 +19,13 @@ os.environ.setdefault("LQ_DB", str(ROOT / "data" / "catalog_work.db"))
 os.environ.setdefault("TELEGRAM_BOT_TOKEN", "")  # бот в этом процессе не нужен
 os.environ["TELEGRAM_ENABLED"] = "0"
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "scripts"))
 
 from server import catalog, generator, service, supplement  # noqa: E402
 from server.db import db, jl  # noqa: E402
 from server.llm import llm  # noqa: E402
 
-COURSES = [  # (номер, папка в «курсы/», название)
-    (101, "анализ больших данных", "Анализ больших данных"),
-    (102, "информационные системы поддержки принятия решений", "Информационные системы поддержки принятия решений"),
-    (103, "ос", "Операционные системы"),
-]
-ORDINALS = {"перв": 1, "втор": 2, "трет": 3, "четверт": 4, "пят": 5, "шест": 6, "седьм": 7, "восьм": 8, "девят": 9, "десят": 10}
-
-
-def order_key(path: pathlib.Path):
-    """Порядок лекций: по номеру в имени файла («Лекция 2 …», «_3_»), иначе по порядковому слову («первая», «второй»)."""
-    name = path.name.lower()
-    m = re.search(r"(?:лекци[яи]|lecture)[\s_]*(\d+)", name)
-    if m:
-        return int(m.group(1))
-    for part in (name, path.parent.name.lower()):
-        for stem, n in ORDINALS.items():
-            if stem in part:
-                return n
-    return 999
-
-
-def course_files(folder: pathlib.Path):
-    files = [p for p in folder.rglob("*") if p.is_file() and not p.name.startswith("~$")]
-    return sorted(files, key=lambda p: (order_key(p), p.name))
+from seed_catalog_lib import COURSES, course_files  # noqa: E402
 
 
 def log(msg):

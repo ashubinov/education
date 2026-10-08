@@ -295,12 +295,7 @@ async def course_detail(cid: int, request: Request):
 async def delete_course(cid: int, request: Request):
     u = me(request)
     own_course(u, cid)
-    with db.tx():
-        db.x("DELETE FROM runs WHERE lesson_id IN (SELECT id FROM lessons WHERE course_id=?)", (cid,))
-        for t in ("sources", "chunks", "modules", "lessons", "answers"):
-            db.x(f"DELETE FROM {t} WHERE course_id=?", (cid,))
-        db.x("DELETE FROM activity WHERE course_id=? AND user_id=?", (cid, u["id"]))
-        db.x("DELETE FROM courses WHERE id=?", (cid,))
+    catalog.delete_course(cid)
     return {"ok": True}
 
 
@@ -419,13 +414,14 @@ async def catalog_export(request: Request):
 
 
 @app.post("/api/admin/catalog/import")
-async def catalog_import(request: Request, file: UploadFile = File(...)):
+async def catalog_import(request: Request, file: UploadFile = File(...), replace: int = 0):
+    """Импорт каталога из файла экспорта. replace=1 — заменить курсы с совпадающими номерами."""
     admin(request)
     try:
         data = json.loads((await file.read()).decode("utf-8"))
     except Exception:
         raise HTTPException(400, "Это не JSON-файл каталога")
-    return await run_in_threadpool(catalog.import_all, data)
+    return await run_in_threadpool(catalog.import_all, data, bool(replace))
 
 
 # =============================================================== уроки и запуски
