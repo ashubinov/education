@@ -131,7 +131,7 @@ def current_step(run: dict, lesson: dict, state: dict) -> dict | None:
 def run_view(run: dict, lesson: dict, state: dict) -> dict:
     step = current_step(run, lesson, state)
     steps = all_steps(lesson, state)
-    return {"run_id": run["id"], "lesson": {"id": lesson["id"], "type": lesson["type"], "title": lesson["title"], "minutes": lesson["minutes"]},
+    return {"run_id": run["id"], "course_id": lesson["course_id"], "lesson": {"id": lesson["id"], "type": lesson["type"], "title": lesson["title"], "minutes": lesson["minutes"]},
             "step": step, "total": len(steps), "done": run["step_idx"], "finished": bool(run["finished_at"]),
             "xp": state.get("xp", 0), "waiting_self": bool(state.get("task_wait"))}
 

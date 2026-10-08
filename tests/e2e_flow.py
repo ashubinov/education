@@ -180,7 +180,7 @@ res = ok(admin.post("/api/admin/catalog/import", files=[("file", ("catalog_seed.
 assert res["skipped"] == [101] and not res["added"], res
 data["courses"][0]["catalog_no"] = 777
 res = ok(admin.post("/api/admin/catalog/import", files=[("file", ("c.json", json.dumps(data).encode(), "application/json"))]))
-assert res["added"] == [777], res
+assert not res["added"] and res["duplicates_removed"] == [777], res  # тот же курс под другим номером — дубликат, в каталог не попадает
 assert admin.post("/api/admin/catalog/import", files=[("file", ("c.json", b"not json", "application/json"))]).status_code == 400
 print("OK: экспорт/импорт каталога")
 

@@ -33,6 +33,9 @@ async def lifespan(app: FastAPI):
         else:
             generator.spawn(generator.build_course(c["id"]))
     # готовые курсы: если каталог пуст и рядом лежит catalog_seed.json — загружаем (удобно для первого запуска в облаке)
+    removed = catalog.dedupe_templates()  # одинаковые курсы в каталоге не нужны: остаётся с меньшим номером
+    if removed:
+        print("Из каталога удалены дубликаты, номера:", removed)
     seed = config.DATA / "catalog_seed.json"
     if seed.exists() and not db.val("SELECT COUNT(*) FROM courses WHERE is_template=1", default=0):
         try:
@@ -403,6 +406,14 @@ async def catalog_add(number: int, request: Request):
     res = await run_in_threadpool(catalog.add_to_user, number, u["id"])
     gm.check_achievements(u["id"])
     return res
+
+
+@app.delete("/api/admin/catalog/{number}")
+async def catalog_delete(number: int, request: Request):
+    """Администратор: удалить курс из каталога (копии у пользователей остаются)."""
+    admin(request)
+    await run_in_threadpool(catalog.delete_template, number)
+    return {"ok": True, "number": number}
 
 
 @app.get("/api/admin/catalog/export")

@@ -4,7 +4,9 @@
 а прогресс, адаптация и XP у каждого пользователя свои. Повторно добавить тот же курс нельзя — вернётся уже существующая копия;
 вместо этого есть «Пройти заново» (сброс прогресса).
 """
+import hashlib
 import json
+import re
 
 from . import auth
 from . import gamification as gm
@@ -116,17 +118,74 @@ def add_to_user(number: int, user_id: int) -> dict:
     return {"course_id": cid, "already": False}
 
 
+def _norm_title(t: str) -> str:
+    return re.sub(r"\s+", " ", (t or "").strip().lower().replace("ё", "е"))
+
+
+def fingerprint(course_id: int) -> str:
+    """Отпечаток материалов курса: одинаковые файлы (по тексту) дают одинаковый отпечаток."""
+    rows = db.q("SELECT text FROM sources WHERE course_id=? ORDER BY id", (course_id,))
+    blob = "\n".join(re.sub(r"\s+", " ", r["text"] or "").strip() for r in rows)
+    return hashlib.sha1(blob.encode("utf-8")).hexdigest() if blob else ""
+
+
+def duplicate_of(course_id: int, title: str | None = None) -> dict | None:
+    """Найти в каталоге курс, который совпадает с данным: тот же исходный шаблон, те же материалы или то же название."""
+    c = db.one("SELECT * FROM courses WHERE id=?", (course_id,))
+    if not c:
+        return None
+    if c["origin_id"]:
+        origin = db.one("SELECT * FROM courses WHERE id=? AND is_template=1", (c["origin_id"],))
+        if origin:
+            return origin
+    fp = fingerprint(course_id)
+    nt = _norm_title(title or c["title"])
+    for t in db.q("SELECT * FROM courses WHERE is_template=1 ORDER BY catalog_no"):
+        if t["id"] == course_id:
+            continue
+        if (fp and fingerprint(t["id"]) == fp) or _norm_title(t["title"]) == nt:
+            return t
+    return None
+
+
 def publish(course_id: int, title: str | None = None) -> int:
-    """Сделать копию курса общедоступной (с новым номером). Только для администратора."""
+    """Сделать копию курса общедоступной (с новым номером). Только для администратора. Одинаковые курсы не публикуются."""
     c = db.one("SELECT * FROM courses WHERE id=?", (course_id,))
     if not c or c["is_template"]:
         raise ValueError("Курс нельзя опубликовать")
+    dup = duplicate_of(course_id, title)
+    if dup:
+        raise ValueError(f"Такой курс уже есть в каталоге под номером {dup['catalog_no']} («{dup['title']}»)")
     tree = read_tree(course_id)
     if title:
         tree["course"]["title"] = title
     n = next_number()
     write_tree(tree, system_user_id(), template=True, catalog_no=n)
     return n
+
+
+def delete_template(number: int):
+    """Удалить курс из каталога. Копии, уже добавленные пользователями, остаются у них."""
+    t = find(number)
+    if not t:
+        raise KeyError("catalog")
+    delete_course(t["id"])
+
+
+def dedupe_templates() -> list[int]:
+    """Убрать из каталога дубликаты (одинаковые материалы): остаётся курс с меньшим номером. Возвращает удалённые номера."""
+    seen: dict[str, dict] = {}
+    removed: list[int] = []
+    for t in db.q("SELECT * FROM courses WHERE is_template=1 ORDER BY catalog_no"):
+        fp = fingerprint(t["id"])
+        if not fp:
+            continue
+        if fp in seen:
+            delete_course(t["id"])
+            removed.append(t["catalog_no"])
+        else:
+            seen[fp] = t
+    return removed
 
 
 # ----------------------------------------------------------------------- повторное прохождение
@@ -186,4 +245,6 @@ def import_all(data: dict, replace: bool = False) -> dict:
             replaced.append(no)
         write_tree(t, sysid, template=True, catalog_no=no)
         added.append(no)
-    return {"added": added, "skipped": skipped, "replaced": replaced}
+    removed = dedupe_templates()  # на случай, если в файле дубликаты уже имеющихся курсов под другими номерами
+    added = [n for n in added if n not in removed]
+    return {"added": added, "skipped": skipped, "replaced": replaced, "duplicates_removed": removed}
