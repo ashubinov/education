@@ -517,6 +517,16 @@ async def stats(request: Request, course_id: int | None = None):
     }
 
 
+@app.post("/api/prank/yes")
+async def prank_yes(request: Request):
+    """Розыгрыш: нажатие «ДА» в окне после регистрации выдаёт скрытое достижение."""
+    u = me(request)
+    a = gm.ACH_BY_KEY["sosun"]
+    fresh = db.one("SELECT 1 AS x FROM achievements WHERE user_id=? AND key='sosun'", (u["id"],)) is None
+    db.x("INSERT OR IGNORE INTO achievements(user_id,key) VALUES(?,?)", (u["id"], "sosun"))
+    return {"new": fresh, "achievement": {"key": a[0], "icon": a[1], "title": a[2], "desc": a[3]}}
+
+
 @app.get("/api/reminder")
 async def reminder(request: Request):
     return notifier.web_reminder(me(request))

@@ -27,7 +27,9 @@ ACHIEVEMENTS = [
     ("night_owl", "🦉", "Сова", "Урок после 23:00"),
     ("early_bird", "🐦", "Жаворонок", "Урок до 7:00"),
     ("comeback", "💪", "Не сдался", "Контрольный тест сдан после работы над ошибками"),
+    ("sosun", "🍼", "Сосун", "Честно ответил «ДА» на главный вопрос"),
 ]
+HIDDEN = {"sosun"}  # скрытые достижения: в списке видны, только когда получены
 ACH_BY_KEY = {a[0]: a for a in ACHIEVEMENTS}
 
 
@@ -265,7 +267,7 @@ def check_achievements(user_id: int, extra: set[str] | None = None) -> list[dict
 def achievements_list(user_id: int) -> list[dict]:
     got = {r["key"]: r["unlocked_at"] for r in db.q("SELECT key, unlocked_at FROM achievements WHERE user_id=?", (user_id,))}
     return [{"key": a[0], "icon": a[1], "title": a[2], "desc": a[3], "unlocked": a[0] in got,
-             "at": got.get(a[0])} for a in ACHIEVEMENTS]
+             "at": got.get(a[0])} for a in ACHIEVEMENTS if a[0] not in HIDDEN or a[0] in got]
 
 
 def user_summary(user_id: int) -> dict:
