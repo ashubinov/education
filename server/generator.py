@@ -716,8 +716,93 @@ def module_summary_text(user_id: int, course_id: int, module_id: int) -> str:
     return "\n".join(lines)
 
 
+# ---- «закрепление»: повторять, пока результат не станет хорошим или заметно лучше первого ----
+MASTERY_FIRST = 0.7      # первая попытка считается удачной от этого порога
+MASTERY_TARGET = 0.8     # цель: дальше не повторяем
+MASTERY_GAIN = 0.2       # «заметное улучшение» относительно первой попытки (при результате не ниже MASTERY_FIRST)
+MASTERY_MAX_TRIES = 3    # максимум повторов на один урок
+MODULE_MAX_RETRIES = 7   # максимум вставленных повторов на модуль целиком
+
+
+def _root_id(l: dict) -> int:
+    return (jl(l["meta"], {}) or {}).get("root") or l["id"]
+
+
+def _score_history(root: int) -> list[float]:
+    rows = db.q("""SELECT score FROM lessons WHERE status='done' AND score IS NOT NULL
+                   AND (id=? OR json_extract(meta,'$.root')=?) ORDER BY id""", (root, root))
+    return [r["score"] for r in rows]
+
+
+def needs_more(hist: list[float]) -> bool:
+    """Нужен ли ещё один повтор. hist — результаты попыток по порядку (первая — исходный урок)."""
+    last, tries = hist[-1], len(hist) - 1
+    if tries >= MASTERY_MAX_TRIES:
+        return False
+    if tries == 0:
+        return last < MASTERY_FIRST
+    if last >= MASTERY_TARGET:
+        return False
+    if last >= MASTERY_FIRST and last - hist[0] >= MASTERY_GAIN:
+        return False  # результат заметно вырос — достаточно
+    return True
+
+
+def _lesson_weak_terms(user_id: int, lesson: dict, module_id: int, limit: int = 3) -> list[dict]:
+    """Термины, на которых ученик ошибся в этом уроке (с определениями из модуля), худшие первыми."""
+    rows = db.q("""SELECT concept, AVG(correct) acc FROM answers WHERE user_id=? AND lesson_id=? AND concept<>''
+                   GROUP BY concept HAVING AVG(correct)<0.7 ORDER BY AVG(correct)""", (user_id, lesson["id"]))
+    pool = {grading.norm(t["term"]): t for t in _module_terms_pool(module_id)}
+    names = [r["concept"] for r in rows if grading.norm(r["concept"]) in pool]
+    if not names:
+        names = [w for w in weak_concepts(user_id, lesson["course_id"], [t["term"] for t in pool.values()], limit=limit) if grading.norm(w) in pool]
+    if not names:
+        names = [t["term"] for t in list(pool.values())[:limit]]
+    return [{"term": pool[grading.norm(n)]["term"], "gist": pool[grading.norm(n)]["definition"][:120]} for n in names[:limit]]
+
+
+def _insert_after(lesson: dict, specs: list[tuple]) -> list[int]:
+    """Вставить уроки сразу после данного. specs: (type, title, meta|callable(prev_ids)->meta). Возвращает id новых уроков."""
+    ids: list[int] = []
+    with db.tx():
+        db.x("UPDATE lessons SET idx=idx+? WHERE module_id=? AND idx>?", (len(specs), lesson["module_id"], lesson["idx"]))
+        for i, (typ, title, meta) in enumerate(specs, 1):
+            meta = meta(ids) if callable(meta) else meta
+            ids.append(_add_lesson(lesson["course_id"], lesson["module_id"], lesson["idx"] + i, typ, title, meta))
+        db.x("UPDATE modules SET retries=retries+1 WHERE id=?", (lesson["module_id"],))
+    return ids
+
+
+def _schedule_retry(c: dict, m: dict, l: dict) -> bool:
+    """Если результат слабый — вставить после урока работу над ошибками и повторную проверку. True, если вставили."""
+    if l["type"] not in ("terms_test", "methods_test", "final_test"):
+        return False
+    if (m["retries"] or 0) >= MODULE_MAX_RETRIES:
+        return False
+    root = _root_id(l)
+    hist = _score_history(root)
+    if not hist or not needs_more(hist):
+        return False
+    n = len(hist)  # номер следующей попытки
+    if l["type"] == "methods_test":
+        specs = [("practice", f"Практика: ещё одна задача (попытка {n + 1})", {"retry": True, "n": 100 + n}),
+                 ("methods_test", f"Тест на методы (попытка {n + 1})", lambda ids: {"for": ids[0], "retry": True, "root": root})]
+    else:
+        group = _lesson_weak_terms(c["user_id"], l, m["id"])
+        if not group:
+            return False
+        names = ", ".join(t["term"] for t in group)
+        specs = [("terms", "Работа над ошибками: " + names, {"terms": group, "remedial": True, "retry": True}),
+                 ("terms_test", f"Проверка после повторения (попытка {n + 1})" if l["type"] == "terms_test" else "Проверка после повторения",
+                  lambda ids: {"for": ids[0], "retry": True, **({"root": root} if l["type"] == "terms_test" else {})})]
+        if l["type"] == "final_test":
+            specs.append(("final_test", f"Повторный контрольный тест (попытка {n + 1})", {"retry": True, "root": root}))
+    _insert_after(l, specs)
+    return True
+
+
 async def after_lesson(lesson_id: int):
-    """Хук после завершения урока: работа над ошибками, закрытие модуля, адаптация, предзагрузка."""
+    """Хук после завершения урока: закрепление (повторы до улучшения), закрытие модуля, адаптация, предзагрузка."""
     try:
         l = db.one("SELECT * FROM lessons WHERE id=?", (lesson_id,))
         if not l:
@@ -727,28 +812,16 @@ async def after_lesson(lesson_id: int):
         if l["type"] == "final_test":
             await _finish_module(c, m, l)
         else:
+            _schedule_retry(c, m, l)
             await prefetch(c["id"])
     except Exception:
         traceback.print_exc()
 
 
 async def _finish_module(c: dict, m: dict, l: dict):
-    score = l["score"] or 0
-    plan = jl(m["plan"], {}) or {}
-    terms = [t["term"] for t in plan.get("terms", [])]
-    if score < 0.6 and (m["retries"] or 0) < 2:
-        weak = weak_concepts(c["user_id"], c["id"], terms, limit=3) or terms[:3]
-        pool = {grading.norm(t["term"]): t for t in _module_terms_pool(m["id"])}
-        group = [{"term": pool[grading.norm(w)]["term"], "gist": pool[grading.norm(w)]["definition"][:120]} for w in weak if grading.norm(w) in pool][:3]
-        if group:
-            idx = (db.val("SELECT MAX(idx) FROM lessons WHERE module_id=?", (m["id"],), 0) or 0) + 1
-            with db.tx():
-                tid = _add_lesson(c["id"], m["id"], idx, "terms", "Работа над ошибками: " + ", ".join(t["term"] for t in group), {"terms": group, "remedial": True})
-                _add_lesson(c["id"], m["id"], idx + 1, "terms_test", "Проверка после повторения", {"for": tid})
-                _add_lesson(c["id"], m["id"], idx + 2, "final_test", "Повторный контрольный тест", {"retry": True})
-                db.x("UPDATE modules SET retries=retries+1 WHERE id=?", (m["id"],))
-            await prefetch(c["id"])
-            return
+    if _schedule_retry(c, m, l):
+        await prefetch(c["id"])
+        return
     db.x("UPDATE modules SET status='done' WHERE id=?", (m["id"],))
     left = db.q("SELECT * FROM modules WHERE course_id=? AND status<>'done' ORDER BY idx", (c["id"],))
     if not left:
