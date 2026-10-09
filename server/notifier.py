@@ -44,7 +44,7 @@ def web_reminder(u: dict) -> dict:
 
 async def _tick():
     today = gm.today()
-    for u in db.q("SELECT * FROM users WHERE tg_chat_id IS NOT NULL AND reminders_on=1"):
+    for u in db.q("SELECT * FROM users WHERE tg_chat_id IS NOT NULL AND reminders_on=1 AND COALESCE(banned,0)=0"):
         try:
             st = gm.streak_info(u["id"])
             if st["done_today"]:

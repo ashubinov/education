@@ -12,11 +12,11 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Res
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
-from . import auth, catalog, config, engine, generator, notifier, service, supplement, tgbot
+from . import auth, catalog, config, engine, generator, notifier, service, social, supplement, tgbot
 from . import gamification as gm
 from .db import db, jd, jl
 from .llm import llm
-from .schemas import AnswerIn, GoalIn, LoginIn, MeUpdate, PasswordChangeIn, PublishIn, RegisterIn, SettingsUpdate, StartIn
+from .schemas import AnswerIn, BanIn, FriendRequestIn, GoalIn, LoginIn, MeUpdate, PasswordChangeIn, PublishIn, RegisterIn, SettingsUpdate, SignatureIn, StartIn
 
 MAX_REQUEST_MB = 80
 
@@ -113,12 +113,15 @@ def own_course(user: dict, course_id: int) -> dict:
 # =============================================================== профиль и вход
 def user_public(u: dict) -> dict:
     xp = gm.total_xp(u["id"])
-    return {
+    out = {
         "id": u["id"], "username": u["username"], "display_name": u["display_name"] or u["username"], "avatar": u["avatar"],
         "theme_color": u["theme_color"], "theme_mode": u["theme_mode"], "sound": bool(u["sound"]),
         "reminders_on": bool(u["reminders_on"]), "reminder_time": u["reminder_time"], "is_admin": bool(u["is_admin"]),
         "telegram": bool(u["tg_chat_id"]), "level": gm.level_info(xp), "streak": gm.streak_info(u["id"]),
     }
+    if u["is_admin"]:
+        out["moderation_pending"] = social.pending_count()
+    return out
 
 
 def _session(uid: int) -> dict:
@@ -498,6 +501,114 @@ async def finish(rid: int, request: Request):
         generator.spawn(generator.after_lesson(lesson["id"]))
     c = db.one("SELECT * FROM courses WHERE id=?", (lesson["course_id"],))
     return {"summary": summary, "course": course_card(c, u)}
+
+
+# =============================================================== друзья и подписи
+@app.get("/api/friends")
+async def friends_overview(request: Request):
+    return social.overview(me(request)["id"])
+
+
+@app.post("/api/friends/request")
+async def friends_request(request: Request, body: FriendRequestIn):
+    return social.request_friend(me(request)["id"], body.username)
+
+
+@app.post("/api/friends/{uid}/accept")
+async def friends_accept(uid: int, request: Request):
+    social.accept(me(request)["id"], uid)
+    return {"ok": True}
+
+
+@app.post("/api/friends/{uid}/decline")
+async def friends_decline(uid: int, request: Request):
+    social.decline_or_cancel(me(request)["id"], uid)
+    return {"ok": True}
+
+
+@app.delete("/api/friends/{uid}")
+async def friends_remove(uid: int, request: Request):
+    social.remove_friend(me(request)["id"], uid)
+    return {"ok": True}
+
+
+@app.get("/api/friends/{uid}")
+async def friend_profile(uid: int, request: Request):
+    """Прогресс друга: уровень, серия, статистика, курсы, достижения (без скрытых) и подписи на его страничке."""
+    u = me(request)
+    f = social.require_friend(u["id"], uid)
+    xp = gm.total_xp(uid)
+    courses = db.q("SELECT * FROM courses WHERE user_id=? AND is_template=0 AND status IN ('ready','completed') ORDER BY COALESCE(last_opened, created_at) DESC", (uid,))
+    ach = [a for a in gm.achievements_list(uid) if a["key"] not in gm.HIDDEN]
+    return {
+        **social.brief(f), "member_since": f["created_at"], "level_full": gm.level_info(xp), "best_streak": gm.streak_info(uid)["best"],
+        "totals": {"lessons": db.val("SELECT SUM(lessons) FROM activity WHERE user_id=?", (uid,), 0) or 0,
+                   "minutes": round((db.val("SELECT SUM(seconds) FROM activity WHERE user_id=?", (uid,), 0) or 0) / 60),
+                   "answers": db.val("SELECT SUM(answers) FROM activity WHERE user_id=?", (uid,), 0) or 0},
+        "week": gm.week(uid),
+        "courses": [{"title": c["title"], "icon": c["icon"], "status": c["status"], "xp": gm.total_xp(uid, c["id"]), "progress": course_progress(c)} for c in courses],
+        "achievements": ach,
+        "wall": social.wall(uid), "my_signature": social.my_signature(u["id"], uid), "sign_max": social.SIGN_MAX,
+    }
+
+
+@app.put("/api/friends/{uid}/signature")
+async def friend_sign(uid: int, request: Request, body: SignatureIn):
+    """Оставить (или заменить) свою подпись на страничке друга. Она появится после проверки администратором."""
+    return social.leave_signature(me(request), uid, body.text)
+
+
+@app.delete("/api/friends/{uid}/signature")
+async def friend_unsign(uid: int, request: Request):
+    social.delete_my_signature(me(request)["id"], uid)
+    return {"ok": True}
+
+
+@app.get("/api/me/wall")
+async def my_wall(request: Request):
+    return {"wall": social.wall(me(request)["id"]), "sign_max": social.SIGN_MAX}
+
+
+@app.delete("/api/me/wall/{sid}")
+async def my_wall_delete(sid: int, request: Request):
+    social.delete_from_my_wall(me(request)["id"], sid)
+    return {"ok": True}
+
+
+# =============================================================== администратор: модерация подписей, пользователи
+@app.get("/api/admin/signatures")
+async def admin_signatures(request: Request):
+    admin(request)
+    return social.pending_list()
+
+
+@app.post("/api/admin/signatures/{sid}/approve")
+async def admin_sign_approve(sid: int, request: Request):
+    return social.moderate(sid, admin(request)["id"], True)
+
+
+@app.post("/api/admin/signatures/{sid}/reject")
+async def admin_sign_reject(sid: int, request: Request):
+    return social.moderate(sid, admin(request)["id"], False)
+
+
+@app.get("/api/admin/users")
+async def admin_users(request: Request, q: str = ""):
+    admin(request)
+    return social.users_list(q[:64])
+
+
+@app.post("/api/admin/users/{uid}/ban")
+async def admin_ban(uid: int, request: Request, body: BanIn = Body(default=BanIn())):
+    social.ban(admin(request)["id"], uid, body.reason)
+    return {"ok": True}
+
+
+@app.post("/api/admin/users/{uid}/unban")
+async def admin_unban(uid: int, request: Request):
+    admin(request)
+    social.unban(uid)
+    return {"ok": True}
 
 
 # =============================================================== статистика

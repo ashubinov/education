@@ -89,3 +89,15 @@ class StartIn(Strict):
 
 class PublishIn(Strict):
     title: Optional[str] = Field(None, max_length=100)
+
+
+class FriendRequestIn(Strict):
+    username: str = Field(min_length=1, max_length=64)
+
+
+class SignatureIn(Strict):
+    text: str = Field(min_length=1, max_length=200)  # точный предел (40 символов) и очистку проверяет social.clean_signature с понятным сообщением
+
+
+class BanIn(Strict):
+    reason: str = Field("", max_length=200)

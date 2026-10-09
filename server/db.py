@@ -27,6 +27,9 @@ CREATE TABLE IF NOT EXISTS users(
   last_reminder2_day TEXT,
   is_admin INTEGER DEFAULT 0,
   token_version INTEGER DEFAULT 0,
+  banned INTEGER DEFAULT 0,
+  banned_reason TEXT,
+  banned_at TEXT,
   created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS sessions(
@@ -142,6 +145,26 @@ CREATE TABLE IF NOT EXISTS settings(
   key TEXT PRIMARY KEY,
   value TEXT
 );
+CREATE TABLE IF NOT EXISTS friendships(
+  requester_id INTEGER NOT NULL,
+  addressee_id INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY(requester_id, addressee_id)
+);
+CREATE TABLE IF NOT EXISTS signatures(
+  id INTEGER PRIMARY KEY,
+  target_id INTEGER NOT NULL,
+  author_id INTEGER NOT NULL,
+  text TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  moderated_by INTEGER,
+  UNIQUE(target_id, author_id)
+);
+CREATE INDEX IF NOT EXISTS ix_friend_addr ON friendships(addressee_id, status);
+CREATE INDEX IF NOT EXISTS ix_sign_status ON signatures(status, created_at);
 CREATE INDEX IF NOT EXISTS ix_modules_course ON modules(course_id, idx);
 CREATE INDEX IF NOT EXISTS ix_lessons_course ON lessons(course_id, module_id, idx);
 CREATE INDEX IF NOT EXISTS ix_runs_user ON runs(user_id, lesson_id);
@@ -166,7 +189,8 @@ class DB:
         def cols(t):
             return {r[1] for r in self.conn.execute(f"PRAGMA table_info({t})")}
         for table, col, ddl in (("users", "token_version", "INTEGER DEFAULT 0"), ("courses", "catalog_no", "INTEGER"),
-                                ("courses", "origin_id", "INTEGER"), ("courses", "is_template", "INTEGER DEFAULT 0")):
+                                ("courses", "origin_id", "INTEGER"), ("courses", "is_template", "INTEGER DEFAULT 0"),
+                                ("users", "banned", "INTEGER DEFAULT 0"), ("users", "banned_reason", "TEXT"), ("users", "banned_at", "TEXT")):
             if col not in cols(table):
                 self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
         self.conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_catalog_no ON courses(catalog_no) WHERE catalog_no IS NOT NULL")

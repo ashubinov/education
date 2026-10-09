@@ -57,6 +57,11 @@ def is_admin_name(username: str) -> bool:
     return bool(admin) and username.strip().lower() == admin
 
 
+def ban_message(u: dict) -> str:
+    reason = (u.get("banned_reason") or "").strip()
+    return "Аккаунт заблокирован администратором" + (f". Причина: {reason}" if reason else ".")
+
+
 def register(username: str, password: str, display_name: str = "", ip: str = "") -> int:
     if config.env("ALLOW_REGISTRATION", "1").lower() in ("0", "false", "no") and db.val("SELECT COUNT(*) FROM users WHERE username<>?", (SYSTEM_USERNAME,), default=0):
         raise HTTPException(403, "Регистрация закрыта администратором")
@@ -84,6 +89,8 @@ def login(username: str, password: str, ip: str = "") -> int:
         _attempts[key] = hist
         raise HTTPException(400, "Неверный логин или пароль")
     _attempts.pop(key, None)
+    if u["banned"]:
+        raise HTTPException(403, ban_message(u))
     if is_admin_name(u["username"]) and not u["is_admin"]:
         db.x("UPDATE users SET is_admin=1 WHERE id=?", (u["id"],))
     return u["id"]
@@ -132,4 +139,6 @@ def require_user(request: Request) -> dict:
     u = user_from_request(request)
     if not u:
         raise HTTPException(401, "Нужно войти")
+    if u["banned"]:
+        raise HTTPException(403, ban_message(u))
     return u

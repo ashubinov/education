@@ -88,7 +88,7 @@ async def send_photo(chat_id: int, png: bytes, caption: str, buttons=None):
 
 # --------------------------------------------------------------------- вспомогательное
 def user_by_chat(chat_id: int) -> dict | None:
-    return db.one("SELECT * FROM users WHERE tg_chat_id=?", (chat_id,))
+    return db.one("SELECT * FROM users WHERE tg_chat_id=? AND COALESCE(banned,0)=0", (chat_id,))
 
 
 MENU = [[("📚 Мои курсы", "menu:courses")], [("📊 Статистика", "menu:stats"), ("🔥 Серия", "menu:streak")]]
@@ -316,7 +316,7 @@ async def on_message(msg: dict):
         parts = text.split(maxsplit=1)
         code = parts[1].strip().upper() if len(parts) > 1 else ""
         if code:
-            u = db.one("SELECT * FROM users WHERE tg_link_code=?", (code,))
+            u = db.one("SELECT * FROM users WHERE tg_link_code=? AND COALESCE(banned,0)=0", (code,))
             if not u:
                 await send(chat_id, "Код не найден или устарел. Сгенерируй новый в веб-версии: Настройки → Telegram.")
                 return
