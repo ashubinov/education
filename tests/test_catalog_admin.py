@@ -19,7 +19,7 @@ admin = httpx.Client(base_url=BASE, timeout=60, headers={"Authorization": f"Bear
 assert a["user"]["is_admin"]
 seed = os.path.join(root, "catalog_seed.json")
 r = admin.post("/api/admin/catalog/import?replace=1", files=[("file", ("c.json", open(seed, "rb"), "application/json"))]).json()
-assert r["added"] == [101, 102] and not r["duplicates_removed"], r
+assert r["added"] == [101, 102, 103] and not r["duplicates_removed"], r
 
 # 1) админ берёт курс №102 к себе и пытается опубликовать копию -> отказ, ссылка на номер 102
 cid = admin.post("/api/catalog/102/add").json()["course_id"]
@@ -49,22 +49,22 @@ for _ in range(100):
         break
     time.sleep(0.3)
 num = admin.post(f"/api/courses/{fresh}/publish", json={}).json()["number"]
-assert num == 103, num
-assert [c["number"] for c in admin.get("/api/catalog").json()] == [101, 102, 103]
+assert num == 104, num
+assert [c["number"] for c in admin.get("/api/catalog").json()] == [101, 102, 103, 104]
 friend = anon.post("/api/auth/register", json={"username": u + "f", "password": "secret1"}).json()
 fr = httpx.Client(base_url=BASE, timeout=60, headers={"Authorization": f"Bearer {friend['token']}"})
-assert fr.delete("/api/admin/catalog/103").status_code == 403
+assert fr.delete("/api/admin/catalog/104").status_code == 403
 assert admin.delete("/api/admin/catalog/999").status_code == 404
-assert admin.delete("/api/admin/catalog/103").status_code == 200
-assert [c["number"] for c in admin.get("/api/catalog").json()] == [101, 102]
+assert admin.delete("/api/admin/catalog/104").status_code == 200
+assert [c["number"] for c in admin.get("/api/catalog").json()] == [101, 102, 103]
 print("OK: админ удаляет курс из каталога, обычный пользователь не может")
 
 # 4) авто-очистка: дубликат уже в базе (как №103 у пользователя) удаляется, остаётся меньший номер
 tree = catalog.read_tree(db.one("select id from courses where is_template=1 and catalog_no=102")["id"])
-catalog.write_tree(tree, catalog.system_user_id(), template=True, catalog_no=103)
-assert [c["number"] for c in catalog.list_catalog(None)] == [101, 102, 103]
+catalog.write_tree(tree, catalog.system_user_id(), template=True, catalog_no=104)
+assert [c["number"] for c in catalog.list_catalog(None)] == [101, 102, 103, 104]
 removed = catalog.dedupe_templates()
-assert removed == [103], removed
-assert [c["number"] for c in catalog.list_catalog(None)] == [101, 102]
-print("OK: дубликат №103 удалён автоматически при проверке (остался №102)")
+assert removed == [104], removed
+assert [c["number"] for c in catalog.list_catalog(None)] == [101, 102, 103]
+print("OK: дубликат №104 удалён автоматически при проверке (остался №102)")
 print("ALL OK")

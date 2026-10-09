@@ -24,9 +24,9 @@ print("импорт:", r.json())
 cat = c.get("/api/catalog").json()
 for x in cat:
     print(f"  №{x['number']} {x['title']}: модулей {x['modules']}, уроков {x['lessons']}, ≈{x['minutes']} мин")
-assert [x["number"] for x in cat] == [101, 102]
+assert [x["number"] for x in cat] == [101, 102, 103]
 r2 = c.post("/api/admin/catalog/import", files=[("file", ("c.json", open(seed, "rb"), "application/json"))]).json()
-assert r2["skipped"] == [101, 102] and not r2["added"], r2
+assert r2["skipped"] == [101, 102, 103] and not r2["added"], r2
 
 
 def solve(lid):
@@ -57,7 +57,7 @@ def solve(lid):
     return c.post(f"/api/runs/{rid}/finish").json()["summary"], n
 
 
-for number in (101, 102):
+for number in (101, 102, 103):
     cid = c.post(f"/api/catalog/{number}/add").json()["course_id"]
     done, steps, images = 0, 0, 0
     kinds = {}
