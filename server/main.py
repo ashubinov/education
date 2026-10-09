@@ -12,11 +12,11 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Res
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
-from . import auth, catalog, config, engine, generator, notifier, service, social, supplement, tgbot
+from . import auth, avatars, backup, catalog, config, engine, generator, notifier, service, social, supplement, tgbot
 from . import gamification as gm
 from .db import db, jd, jl
 from .llm import llm
-from .schemas import AnswerIn, BanIn, FriendRequestIn, GoalIn, LoginIn, MeUpdate, PasswordChangeIn, PublishIn, RegisterIn, SettingsUpdate, SignatureIn, StartIn
+from .schemas import AnswerIn, BanIn, FriendRequestIn, GoalIn, LoginIn, MeUpdate, PasswordChangeIn, PublishIn, RegisterIn, SettingsUpdate, SignatureIn, StartIn, UsernameChangeIn
 
 MAX_REQUEST_MB = 80
 
@@ -45,9 +45,11 @@ async def lifespan(app: FastAPI):
             print("Не удалось загрузить catalog_seed.json:", e)
     tgbot.start()
     notifier.start()
+    backup.start()
     yield
     await tgbot.stop()
     await notifier.stop()
+    await backup.stop()
 
 
 app = FastAPI(title="LearnQuest API", lifespan=lifespan, docs_url="/api/docs", redoc_url=None, openapi_url="/api/openapi.json")
@@ -115,7 +117,7 @@ def user_public(u: dict) -> dict:
     xp = gm.total_xp(u["id"])
     out = {
         "id": u["id"], "username": u["username"], "display_name": u["display_name"] or u["username"], "avatar": u["avatar"],
-        "theme_color": u["theme_color"], "theme_mode": u["theme_mode"], "sound": bool(u["sound"]),
+        "avatar_url": avatars.url(u["id"]), "theme_color": u["theme_color"], "theme_mode": u["theme_mode"], "sound": bool(u["sound"]),
         "reminders_on": bool(u["reminders_on"]), "reminder_time": u["reminder_time"], "is_admin": bool(u["is_admin"]),
         "telegram": bool(u["tg_chat_id"]), "level": gm.level_info(xp), "streak": gm.streak_info(u["id"]),
     }
@@ -153,6 +155,39 @@ async def change_password(request: Request, body: PasswordChangeIn):
     u = me(request)
     await run_in_threadpool(auth.change_password, u["id"], body.current_password, body.new_password, auth.client_ip(request))
     return {"token": auth.make_token(u["id"]), "ok": True}
+
+
+@app.put("/api/me/username")
+async def change_username(request: Request, body: UsernameChangeIn):
+    """Сменить логин (нужен пароль). Токены остаются рабочими."""
+    u = me(request)
+    await run_in_threadpool(auth.change_username, u["id"], body.username, body.password, auth.client_ip(request))
+    return user_public(db.one("SELECT * FROM users WHERE id=?", (u["id"],)))
+
+
+@app.put("/api/me/avatar")
+async def upload_avatar(request: Request, file: UploadFile = File(...)):
+    """Загрузить свою аватарку (PNG/JPEG до 1 МБ): сервер проверит и уменьшит её до 256 px."""
+    u = me(request)
+    data = await file.read(avatars.MAX_UPLOAD + 1)
+    await run_in_threadpool(avatars.save, u["id"], data)
+    return user_public(db.one("SELECT * FROM users WHERE id=?", (u["id"],)))
+
+
+@app.delete("/api/me/avatar")
+async def delete_avatar(request: Request):
+    u = me(request)
+    avatars.remove(u["id"])
+    return user_public(db.one("SELECT * FROM users WHERE id=?", (u["id"],)))
+
+
+@app.get("/api/avatars/{key}")
+async def avatar_image(key: str):
+    """Сама картинка: без входа (её грузит тег <img>), ключ в адресе меняется при каждой замене, поэтому кэш вечный."""
+    got = avatars.get(key[:64])
+    if not got:
+        raise HTTPException(404, "Нет такой картинки")
+    return Response(content=got[0], media_type=got[1], headers={"Cache-Control": "public, max-age=31536000, immutable"})
 
 
 @app.get("/api/me")
@@ -604,11 +639,40 @@ async def admin_ban(uid: int, request: Request, body: BanIn = Body(default=BanIn
     return {"ok": True}
 
 
+@app.delete("/api/admin/users/{uid}")
+async def admin_delete_user(uid: int, request: Request):
+    """Удалить пользователя навсегда со всеми его данными."""
+    social.delete_user(admin(request)["id"], uid)
+    return {"ok": True}
+
+
 @app.post("/api/admin/users/{uid}/unban")
 async def admin_unban(uid: int, request: Request):
     admin(request)
     social.unban(uid)
     return {"ok": True}
+
+
+@app.get("/api/admin/backups")
+async def admin_backups(request: Request):
+    admin(request)
+    return {"backups": backup.list_backups(), "keep": backup.keep(), "every_hours": backup.EVERY_SECONDS // 3600}
+
+
+@app.post("/api/admin/backups")
+async def admin_backup_now(request: Request):
+    """Сделать резервную копию базы прямо сейчас."""
+    admin(request)
+    return await run_in_threadpool(backup.make_backup)
+
+
+@app.get("/api/admin/backups/{name}")
+async def admin_backup_download(name: str, request: Request):
+    admin(request)
+    p = backup.path_of(name)
+    if not p:
+        raise HTTPException(404, "Копия не найдена")
+    return FileResponse(p, media_type="application/gzip", filename=name)
 
 
 # =============================================================== статистика

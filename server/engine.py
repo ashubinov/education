@@ -1,4 +1,5 @@
 """Движок прохождения урока: шаги, проверка ответов, опыт. Общий для веб-интерфейса и Telegram."""
+import asyncio
 import random
 import re
 import time
@@ -190,7 +191,6 @@ _run_locks: dict[int, "asyncio.Lock"] = {}
 
 async def submit(user_id: int, run_id: int, payload: dict) -> dict:
     """Принять ответ на текущий шаг. Параллельные запросы одного прохождения (двойной клик) выстраиваются в очередь."""
-    import asyncio
     lk = _run_locks.setdefault(run_id, asyncio.Lock())
     async with lk:
         return await _submit(user_id, run_id, payload)

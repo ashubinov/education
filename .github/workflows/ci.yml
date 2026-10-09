@@ -1,0 +1,41 @@
+name: CI
+
+# Запускается на каждый push в main и на каждый pull request.
+# Если здесь красный крестик — в main это сливать нельзя (см. CONTRIBUTING.md).
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"   # как на Amvera (amvera.yml)
+          cache: pip
+
+      - name: Секреты и базы не должны попадать в репозиторий
+        run: |
+          bad=$(git ls-files | grep -E '(^|/)\.env$|\.db$|\.db-(wal|shm)$|catalog_seed\.json$' || true)
+          if [ -n "$bad" ]; then echo "В репозитории лежат файлы, которым там не место:"; echo "$bad"; exit 1; fi
+
+      - name: Зависимости
+        run: pip install -r requirements.txt ruff
+
+      - name: Поиск настоящих ошибок (ruff)
+        run: ruff check --select E9,F63,F7,F82 server tests scripts
+
+      - name: Все проверки (сквозные тесты на мок-ИИ)
+        run: python tests/run_ci.py

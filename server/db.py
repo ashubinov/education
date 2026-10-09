@@ -163,6 +163,13 @@ CREATE TABLE IF NOT EXISTS signatures(
   moderated_by INTEGER,
   UNIQUE(target_id, author_id)
 );
+CREATE TABLE IF NOT EXISTS avatars(
+  user_id INTEGER PRIMARY KEY,
+  key TEXT UNIQUE NOT NULL,
+  mime TEXT NOT NULL,
+  data BLOB NOT NULL,
+  updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
 CREATE INDEX IF NOT EXISTS ix_friend_addr ON friendships(addressee_id, status);
 CREATE INDEX IF NOT EXISTS ix_sign_status ON signatures(status, created_at);
 CREATE INDEX IF NOT EXISTS ix_modules_course ON modules(course_id, idx);

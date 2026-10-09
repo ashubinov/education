@@ -108,6 +108,26 @@ def change_password(user_id: int, current: str, new: str, ip: str = ""):
     db.x("UPDATE users SET pass_hash=?, salt=?, token_version=COALESCE(token_version,0)+1 WHERE id=?", (_hash(new, salt), salt, user_id))
 
 
+def change_username(user_id: int, new: str, password: str, ip: str = "") -> str:
+    """Сменить логин (по паролю). Токены остаются рабочими: они привязаны к id, а не к логину."""
+    u = db.one("SELECT * FROM users WHERE id=?", (user_id,))
+    _throttle(_attempts, f"uname|{user_id}|{ip}", 8, 300, "Слишком много попыток. Подождите пару минут.")
+    if not u or not hmac.compare_digest(_hash(password, u["salt"]), u["pass_hash"]):
+        raise HTTPException(400, "Пароль неверный")
+    new = new.strip()
+    if u["is_admin"] or is_admin_name(u["username"]):
+        raise HTTPException(400, "Логин администратора меняется только на сервере (переменная ADMIN_USERNAME)")
+    if new == u["username"]:
+        raise HTTPException(400, "Это ваш текущий логин")
+    if new.lower() == SYSTEM_USERNAME or is_admin_name(new):
+        raise HTTPException(400, "Такой логин уже занят")
+    other = db.one("SELECT id FROM users WHERE username=?", (new,))
+    if other and other["id"] != user_id:  # смена только регистра собственного логина (ivan → Ivan) допустима
+        raise HTTPException(400, "Такой логин уже занят")
+    db.x("UPDATE users SET username=? WHERE id=?", (new, user_id))
+    return new
+
+
 def make_token(user_id: int) -> str:
     u = db.one("SELECT token_version FROM users WHERE id=?", (user_id,))
     now = int(time.time())
@@ -132,6 +152,10 @@ def user_from_request(request: Request):
     if is_admin_name(u["username"]) and not u["is_admin"]:  # ADMIN_USERNAME добавили/изменили уже после регистрации
         db.x("UPDATE users SET is_admin=1 WHERE id=?", (u["id"],))
         u["is_admin"] = 1
+    elif u["is_admin"] and config.env("ADMIN_USERNAME").strip() and not is_admin_name(u["username"]):
+        # администратор — только тот, кого назвали в ADMIN_USERNAME (его меняет владелец сервера); прежние отметки снимаются
+        db.x("UPDATE users SET is_admin=0 WHERE id=?", (u["id"],))
+        u["is_admin"] = 0
     return u
 
 

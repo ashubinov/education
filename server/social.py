@@ -7,7 +7,7 @@ import re
 
 from fastapi import HTTPException
 
-from . import auth
+from . import auth, avatars
 from . import gamification as gm
 from .db import db
 
@@ -29,10 +29,14 @@ def last_active(uid: int) -> str | None:
     return db.val("SELECT MAX(day) FROM activity WHERE user_id=? AND (lessons>0 OR xp>0)", (uid,))
 
 
+def pub(u: dict) -> dict:
+    """Что о пользователе можно показывать другим."""
+    return {"id": u["id"], "username": u["username"], "display_name": u["display_name"] or u["username"], "avatar": u["avatar"], "avatar_url": avatars.url(u["id"])}
+
+
 def brief(u: dict) -> dict:
     xp = gm.total_xp(u["id"])
-    return {"id": u["id"], "username": u["username"], "display_name": u["display_name"] or u["username"], "avatar": u["avatar"],
-            "level": gm.level_info(xp)["level"], "xp": xp, "streak": gm.streak_info(u["id"])["current"], "last_active": last_active(u["id"])}
+    return {**pub(u), "level": gm.level_info(xp)["level"], "xp": xp, "streak": gm.streak_info(u["id"])["current"], "last_active": last_active(u["id"])}
 
 
 # ------------------------------------------------------------------ друзья
@@ -62,9 +66,9 @@ def overview(me_id: int) -> dict:
         if r["status"] == "accepted":
             friends.append(brief(u))
         elif r["requester_id"] == me_id:
-            outgoing.append({"id": u["id"], "username": u["username"], "display_name": u["display_name"] or u["username"], "avatar": u["avatar"]})
+            outgoing.append(pub(u))
         else:
-            incoming.append({"id": u["id"], "username": u["username"], "display_name": u["display_name"] or u["username"], "avatar": u["avatar"]})
+            incoming.append(pub(u))
     friends.sort(key=lambda f: (-(f["streak"] or 0), -f["xp"]))
     return {"friends": friends, "incoming": incoming, "outgoing": outgoing}
 
@@ -84,7 +88,7 @@ def request_friend(me_id: int, username: str) -> dict:
         db.x("UPDATE friendships SET status='accepted' WHERE requester_id=? AND addressee_id=?", (other["id"], me_id))  # встречная заявка = согласие
         return {"status": "accepted", "user": brief(other)}
     db.x("INSERT INTO friendships(requester_id, addressee_id, status) VALUES(?,?, 'pending')", (me_id, other["id"]))
-    return {"status": "pending", "user": {"id": other["id"], "username": other["username"], "display_name": other["display_name"] or other["username"], "avatar": other["avatar"]}}
+    return {"status": "pending", "user": pub(other)}
 
 
 def accept(me_id: int, other_id: int):
@@ -120,7 +124,7 @@ def clean_signature(text: str) -> str:
 def _sig_out(r: dict, author: dict | None = None) -> dict:
     out = {"id": r["id"], "text": r["text"], "status": r["status"], "created_at": r["created_at"], "updated_at": r["updated_at"]}
     if author:
-        out["author"] = {"id": author["id"], "username": author["username"], "display_name": author["display_name"] or author["username"], "avatar": author["avatar"]}
+        out["author"] = pub(author)
     return out
 
 
@@ -178,7 +182,7 @@ def pending_list() -> list[dict]:
         if not (_visible(a) and _visible(t)):
             continue
         o = _sig_out(r, a)
-        o["target"] = {"id": t["id"], "username": t["username"], "display_name": t["display_name"] or t["username"], "avatar": t["avatar"]}
+        o["target"] = pub(t)
         out.append(o)
     return out
 
@@ -199,8 +203,7 @@ def users_list(q: str = "") -> list[dict]:
     out = []
     for u in rows:
         xp = gm.total_xp(u["id"])
-        out.append({"id": u["id"], "username": u["username"], "display_name": u["display_name"] or u["username"], "avatar": u["avatar"],
-                    "created_at": u["created_at"], "is_admin": bool(u["is_admin"]), "banned": bool(u["banned"]), "banned_reason": u["banned_reason"],
+        out.append({**pub(u), "created_at": u["created_at"], "is_admin": bool(u["is_admin"]), "banned": bool(u["banned"]), "banned_reason": u["banned_reason"],
                     "banned_at": u["banned_at"], "xp": xp, "level": gm.level_info(xp)["level"],
                     "courses": db.val("SELECT COUNT(*) FROM courses WHERE user_id=? AND is_template=0", (u["id"],), 0), "last_active": last_active(u["id"]),
                     "telegram": bool(u["tg_chat_id"])})
@@ -222,3 +225,23 @@ def unban(uid: int):
     if not db.one("SELECT 1 AS x FROM users WHERE id=? AND username<>?", (uid, auth.SYSTEM_USERNAME)):
         raise HTTPException(404, "Пользователь не найден")
     db.x("UPDATE users SET banned=0, banned_reason=NULL, banned_at=NULL WHERE id=?", (uid,))
+
+
+def delete_user(admin_id: int, uid: int):
+    """Удалить пользователя навсегда: аккаунт, курсы с уроками и прогрессом, друзей, подписи, аватарку."""
+    from . import catalog  # здесь, чтобы не создавать цикл импорта
+    u = db.one("SELECT * FROM users WHERE id=?", (uid,))
+    if not u or u["username"] == auth.SYSTEM_USERNAME:
+        raise HTTPException(404, "Пользователь не найден")
+    if uid == admin_id:
+        raise HTTPException(400, "Нельзя удалить самого себя")
+    if u["is_admin"] or auth.is_admin_name(u["username"]):
+        raise HTTPException(400, "Администратора удалить нельзя")
+    for c in db.q("SELECT id FROM courses WHERE user_id=?", (uid,)):
+        catalog.delete_course(c["id"])
+    with db.tx():
+        for sql in ("DELETE FROM runs WHERE user_id=?", "DELETE FROM answers WHERE user_id=?", "DELETE FROM activity WHERE user_id=?",
+                    "DELETE FROM achievements WHERE user_id=?", "DELETE FROM sessions WHERE user_id=?", "DELETE FROM avatars WHERE user_id=?",
+                    "DELETE FROM friendships WHERE requester_id=? OR addressee_id=?", "DELETE FROM signatures WHERE author_id=? OR target_id=?",
+                    "DELETE FROM users WHERE id=?"):
+            db.x(sql, (uid, uid) if sql.count("?") == 2 else (uid,))

@@ -101,3 +101,8 @@ class SignatureIn(Strict):
 
 class BanIn(Strict):
     reason: str = Field("", max_length=200)
+
+
+class UsernameChangeIn(Strict):
+    username: str = Field(pattern=LOGIN_RE, description="3–32 символа: буквы, цифры, . _ -")
+    password: str = Field(min_length=1, max_length=128)
