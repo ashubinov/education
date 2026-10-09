@@ -17,7 +17,8 @@ from server.db import db  # noqa: E402
 c = httpx.Client(base_url=BASE, timeout=60)
 tok = c.post("/api/auth/register", json={"username": f"mast{int(time.time()) % 100000}", "password": "secret1"}).json()["token"]
 c.headers["Authorization"] = f"Bearer {tok}"
-files = [("files", (os.path.basename(p), open(p, "rb"), "application/pdf")) for p in sorted(glob.glob(os.path.join(root, "test_files", "*.pdf")))[:2]]
+from tests.fixtures import sample_files  # noqa: E402
+files = [("files", f) for f in sample_files()[:2]]
 cid = c.post("/api/courses", files=files).json()["id"]
 
 

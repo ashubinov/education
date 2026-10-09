@@ -63,7 +63,8 @@ assert "authorization" in pre.headers.get("access-control-allow-headers", "").lo
 print("OK: JWT, валидация, CORS")
 
 # ---------- 2. курс из файлов и прохождение ----------
-files = [("files", (os.path.basename(p), open(p, "rb"), "application/pdf")) for p in sorted(glob.glob(os.path.join(root, "test_files", "*.pdf")))]
+from tests.fixtures import sample_files  # noqa: E402
+files = [("files", f) for f in sample_files()]
 r = ok(admin.post("/api/courses", files=files, data={"title": ""}))
 cid = r["id"]
 card = wait(lambda: (lambda d: d if d["status"] in ("ready", "error") else None)(ok(admin.get(f"/api/courses/{cid}"))), "course build")

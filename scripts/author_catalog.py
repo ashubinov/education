@@ -102,7 +102,7 @@ async def main():
         out.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
         log(f"ВСЁ ГОТОВО. Экспортировано курсов: {len(data['courses'])} → {out} ({out.stat().st_size // 1024} КБ)")
     else:
-        log(f"Нужно ответов: {len(missing)}. Новые промпты — в {AUTHORING}\<номер курса>\\")
+        log(f"Нужно ответов: {len(missing)}. Новые промпты — в {AUTHORING}{os.sep}<номер курса>{os.sep}")
 
 
 asyncio.run(main())

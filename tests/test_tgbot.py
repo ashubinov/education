@@ -96,8 +96,9 @@ async def main():
     tgbot.TRANSPORT = httpx.MockTransport(handler)
     uid = auth.register("tgtester", "secret1", "ТГ")
     db.x("UPDATE users SET tg_link_code='ABCD1234' WHERE id=?", (uid,))
-    text = open(glob.glob("test_files/*.pdf")[0], "rb").read()
-    cid, _ = service.create_course(uid, [("lec.pdf", text)], "Тест TG")
+    from tests.fixtures import sample_files
+    name, text, _ = sample_files()[0]
+    cid, _ = service.create_course(uid, [(name, text)], "Тест TG")
     for _ in range(100):
         await asyncio.sleep(0.2)
         if db.one("select status from courses where id=?", (cid,))["status"] == "ready":
