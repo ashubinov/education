@@ -229,7 +229,7 @@ def unban(uid: int):
 
 def delete_user(admin_id: int, uid: int):
     """Удалить пользователя навсегда: аккаунт, курсы с уроками и прогрессом, друзей, подписи, аватарку."""
-    from . import catalog, slots  # здесь, чтобы не создавать цикл импорта
+    from . import catalog, slots, minigames  # здесь, чтобы не создавать цикл импорта
     u = db.one("SELECT * FROM users WHERE id=?", (uid,))
     if not u or u["username"] == auth.SYSTEM_USERNAME:
         raise HTTPException(404, "Пользователь не найден")
@@ -239,6 +239,7 @@ def delete_user(admin_id: int, uid: int):
         raise HTTPException(400, "Администратора удалить нельзя")
     for c in db.q("SELECT id FROM courses WHERE user_id=?", (uid,)):
         catalog.delete_course(c["id"])
+    minigames.on_user_delete(uid)  # вернуть/выдать замороженные жетоны перед удалением
     slots.delete_user_slot_data(uid)
     with db.tx():
         for sql in ("DELETE FROM runs WHERE user_id=?", "DELETE FROM answers WHERE user_id=?", "DELETE FROM activity WHERE user_id=?",

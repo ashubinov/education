@@ -62,6 +62,10 @@ def init_schema() -> None:
             DELETE FROM chat_messages WHERE user_id=OLD.id;
         END;
         """)
+        # Compatible with existing chat_messages created before mini-games.
+        columns = {r[1] for r in db.conn.execute("PRAGMA table_info(chat_messages)")}
+        if "system_kind" not in columns:
+            db.conn.execute("ALTER TABLE chat_messages ADD COLUMN system_kind TEXT")
 
 
 def _identity(request: Request) -> dict:
@@ -70,7 +74,7 @@ def _identity(request: Request) -> dict:
     return auth.require_user(request)
 
 
-_SELECT = """SELECT m.id, m.user_id, m.text, m.created_at,
+_SELECT = """SELECT m.id, m.user_id, m.text, m.created_at, m.system_kind,
                   u.display_name, u.username, u.avatar
              FROM chat_messages m JOIN users u ON u.id=m.user_id"""
 
@@ -81,7 +85,7 @@ def _public(r: dict) -> dict:
         "name": r["display_name"] or r["username"],
         "avatar": r["avatar"] or "👤",
         "avatar_url": avatars.url(r["user_id"]),
-        "text": r["text"], "created_at": r["created_at"],
+        "text": r["text"], "created_at": r["created_at"], "system_kind": r["system_kind"],
     }
 
 
@@ -163,3 +167,25 @@ async def chat_updates(request: Request, after: int = Query(0, ge=0)):
 async def chat_send(request: Request, body: MessageIn):
     user = _identity(request)
     return await run_in_threadpool(send, user["id"], body.text, body.request_id)
+
+
+# System announcements are written only by trusted server modules, within db.tx().
+# Never expose this helper as an endpoint that accepts arbitrary user-provided text.
+def post_system(text: str, source: str, kind: str = "system") -> int:
+    if kind not in ("system", "strawberry", "command"):
+        raise ValueError("Unknown system message kind")
+    system_id = db.val("SELECT id FROM users WHERE username=?", (auth.SYSTEM_USERNAME,))
+    if not system_id:
+        raise RuntimeError("System user does not exist")
+    request_id = "sys:" + source
+    if len(request_id) > 128:
+        raise ValueError("System event id too long")
+    existing = db.val("SELECT id FROM chat_messages WHERE user_id=? AND request_id=?", (system_id, request_id))
+    if existing:
+        return existing
+    now = int(time.time())
+    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    mid = db.x("""INSERT INTO chat_messages(user_id,request_id,text,created_ts,created_at,system_kind)
+               VALUES(?,?,?,?,?,?)""", (system_id,request_id,text,now,stamp,kind))
+    db.x("INSERT INTO chat_events(message_id,kind,created_ts) VALUES(?,'sent',?)", (mid,now))
+    return mid

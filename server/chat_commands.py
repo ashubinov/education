@@ -195,6 +195,7 @@ def use(user_id: int, name: str, request_id: str):
         text = f"🎁 {name} → +{amount} жетонов"
         mid = db.x("""INSERT INTO chat_messages(user_id,request_id,text,created_ts,created_at)
                        VALUES(?,?,?,?,?)""", (user_id, "cmd:" + request_id, text, now, stamp))
+        db.x("UPDATE chat_messages SET system_kind='command' WHERE id=?", (mid,))
         db.x("INSERT INTO chat_events(message_id,kind,created_ts) VALUES(?,'sent',?)", (mid, now))
         db.x("""INSERT INTO chat_command_uses(command_id,user_id,request_id,used_ts,amount,balance_after,message_id)
                  VALUES(?,?,?,?,?,?,?)""", (cmd["id"], user_id, request_id, now, amount, balance, mid))
