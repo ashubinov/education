@@ -16,7 +16,7 @@ from . import auth, avatars, backup, catalog, config, engine, generator, notifie
 from . import gamification as gm
 from . import chat
 from . import chat_commands
-from . import minigames
+from . import arena, farm, lab, minigames, pet, pixels
 from .db import db, jd, jl
 from .llm import llm
 from .schemas import THEME_DEFAULT, AnswerIn, BanIn, FriendRequestIn, GoalIn, LoginIn, MeUpdate, PasswordChangeIn, PublishIn, RegisterIn, SettingsUpdate, SignatureIn, SlotBuyIn, SlotSpinIn, StartIn, UsernameChangeIn
@@ -29,6 +29,11 @@ async def lifespan(app: FastAPI):
     chat.init_schema()
     chat_commands.init_schema()
     minigames.init_schema()
+    pixels.init_schema()
+    pet.init_schema()
+    arena.init_schema()
+    farm.init_schema()
+    lab.init_schema()
     generator.set_loop(asyncio.get_running_loop())
     catalog.system_user_id()
     # восстановление после перезапуска
@@ -70,6 +75,11 @@ app = FastAPI(title="LearnQuest API", lifespan=lifespan, docs_url="/api/docs", r
 app.include_router(chat.router)
 app.include_router(chat_commands.router)
 app.include_router(minigames.router)
+app.include_router(pixels.router)
+app.include_router(pet.router)
+app.include_router(arena.router)
+app.include_router(farm.router)
+app.include_router(lab.router)
 
 # ---------- CORS: фронт на GitHub Pages ходит на этот бэкенд с другого домена; авторизация — Bearer-токеном, куки не нужны ----------
 _local = [f"http://127.0.0.1:{config.PORT}", f"http://localhost:{config.PORT}"]
@@ -602,7 +612,7 @@ async def friend_profile(uid: int, request: Request):
                    "answers": db.val("SELECT SUM(answers) FROM activity WHERE user_id=?", (uid,), 0) or 0},
         "week": gm.week(uid),
         "courses": [{"title": c["title"], "icon": c["icon"], "status": c["status"], "xp": gm.total_xp(uid, c["id"]), "progress": course_progress(c)} for c in courses],
-        "achievements": ach, "slots": slots.public_stats(uid),
+        "achievements": ach, "slots": slots.public_stats(uid), "pixels": pixels.public_stats(uid), "pet": pet.public_view(uid, u["id"]), "farm": farm.public_stats(uid), "lab": lab.public_stats(uid),
         "wall": social.wall(uid), "my_signature": social.my_signature(u["id"], uid), "sign_max": social.SIGN_MAX,
     }
 
