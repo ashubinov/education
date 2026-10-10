@@ -601,7 +601,7 @@ async def friend_profile(uid: int, request: Request):
                    "answers": db.val("SELECT SUM(answers) FROM activity WHERE user_id=?", (uid,), 0) or 0},
         "week": gm.week(uid),
         "courses": [{"title": c["title"], "icon": c["icon"], "status": c["status"], "xp": gm.total_xp(uid, c["id"]), "progress": course_progress(c)} for c in courses],
-        "achievements": ach,
+        "achievements": ach, "slots": slots.public_stats(uid),
         "wall": social.wall(uid), "my_signature": social.my_signature(u["id"], uid), "sign_max": social.SIGN_MAX,
     }
 

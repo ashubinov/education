@@ -20,8 +20,8 @@ from . import gamification as gm
 from .db import db
 
 # ----------------------------------------------------------------------------- настройки (позже легко вынести в конфиг)
-BETS = (10, 20, 50, 100, 200, 500, 1000)   # быстрые ставки; можно выбрать и свою сумму
-MIN_BET, MAX_BET, BET_STEP = 10, 1000, 10   # своя ставка: от 10 до 1000, кратна 10 (ставка делится поровну на 10 линий)
+BETS = (10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000)   # быстрые ставки; можно выбрать и свою сумму
+MIN_BET, MAX_BET, BET_STEP = 10, 10000, 10   # своя ставка: от 10 до 10 000, кратна 10 (ставка делится поровну на 10 линий)
 START_BALANCE = 1000
 DAILY_BONUS = 100
 REELS, ROWS = 5, 3
@@ -230,6 +230,15 @@ def stats_of(acc: dict) -> dict:
     spins = acc["spins_total"]
     return {"spins": spins, "won_total": acc["won_total"], "wagered_total": acc["wagered_total"], "best_win": acc["best_win"],
             "win_rate": round(acc["wins_count"] / spins, 3) if spins else 0.0}
+
+
+def public_stats(user_id: int) -> dict | None:
+    """Итоги игры в слоты, которые видят друзья: сколько поставлено (потрачено), выиграно и какой итог. None — ещё не играл."""
+    acc = db.one("SELECT * FROM slot_accounts WHERE user_id=?", (user_id,))
+    if not acc or not acc["spins_total"]:
+        return None
+    return {"spins": acc["spins_total"], "wagered": acc["wagered_total"], "won": acc["won_total"],
+            "net": acc["won_total"] - acc["wagered_total"], "best_win": acc["best_win"]}
 
 
 def meta() -> dict:
