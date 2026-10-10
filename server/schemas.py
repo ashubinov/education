@@ -111,3 +111,8 @@ class UsernameChangeIn(Strict):
 class SlotSpinIn(Strict):
     bet: int = Field(ge=1, le=100000)
     request_id: Optional[str] = Field(None, pattern=r"^[A-Za-z0-9_-]{8,64}$", description="уникальный номер вращения от клиента: повтор запроса не спишет ставку второй раз")
+
+
+class SlotBuyIn(Strict):
+    chips: int = Field(ge=1, le=100000)
+    request_id: Optional[str] = Field(None, pattern=r"^[A-Za-z0-9_-]{8,64}$")

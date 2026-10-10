@@ -25,6 +25,11 @@ START_BALANCE = 1000
 DAILY_BONUS = 100
 REELS, ROWS = 5, 3
 HISTORY_LIMIT = 50
+# покупка жетонов за XP: жёсткие фиксированные цены, без скидок за объём. Один урок даёт в среднем ≈145 XP, то есть ≈29 жетонов
+XP_PER_CHIP = 5
+PACKS = (50, 100, 200)       # жетонов в пакете; цена = жетоны × XP_PER_CHIP
+DAILY_BUY_LIMIT = 200        # не больше стольких купленных жетонов в сутки
+BUY_ONLY_BELOW = 300         # докупить можно, только если жетонов осталось меньше
 LEADERBOARD_SIZE = 10
 
 WILD, SCATTER, BONUS = "wild", "scatter", "bonus"
@@ -230,10 +235,46 @@ def meta() -> dict:
             "scatter_pays": SCATTER_PAYS, "bonus_count_mult": BONUS_COUNT_MULT, "reels": REELS, "rows": ROWS}
 
 
+def _exchange(acc: dict) -> dict:
+    """XP, которые можно потратить: заработанные минус уже потраченные. Уровень и достижения считаются по всем заработанным XP и от трат не меняются."""
+    total = gm.total_xp(acc["user_id"])
+    spent = acc["xp_spent"]
+    bought = acc["bought_today"] if acc["bought_day"] == gm.today() else 0
+    return {"xp_per_chip": XP_PER_CHIP, "packs": [{"chips": c, "xp": c * XP_PER_CHIP} for c in PACKS], "xp_total": total, "xp_spent": spent,
+            "xp_available": max(0, total - spent), "bought_today": bought, "daily_limit": DAILY_BUY_LIMIT, "remaining_today": max(0, DAILY_BUY_LIMIT - bought),
+            "buy_only_below": BUY_ONLY_BELOW}
+
+
+def buy_chips(user_id: int, chips: int, request_id: str | None = None) -> dict:
+    """Обменять XP на жетоны (в одну сторону). Всё проверяется и списывается в одной транзакции."""
+    if chips not in PACKS:
+        raise HTTPException(400, "Такого пакета нет. Доступно: " + ", ".join(map(str, PACKS)))
+    price = chips * XP_PER_CHIP
+    with db.tx():
+        acc = ensure_account(user_id)
+        if request_id:
+            old = db.one("SELECT * FROM slot_purchases WHERE user_id=? AND request_id=?", (user_id, request_id))
+            if old:
+                return {"chips": old["chips"], "xp": old["xp"], "balance": old["balance_after"], "replayed": True, "exchange": _exchange(acc)}
+        ex = _exchange(acc)
+        if acc["balance"] >= BUY_ONLY_BELOW:
+            raise HTTPException(400, f"Докупить можно, только когда жетонов меньше {BUY_ONLY_BELOW}")
+        if chips > ex["remaining_today"]:
+            raise HTTPException(400, f"Дневной лимит покупок — {DAILY_BUY_LIMIT} жетонов, сегодня можно ещё {ex['remaining_today']}")
+        if price > ex["xp_available"]:
+            raise HTTPException(400, f"Не хватает XP: нужно {price}, доступно {ex['xp_available']}")
+        balance = acc["balance"] + chips
+        db.x("UPDATE slot_accounts SET balance=?, xp_spent=xp_spent+?, bought_day=?, bought_today=?, updated_at=CURRENT_TIMESTAMP WHERE user_id=?",
+             (balance, price, gm.today(), ex["bought_today"] + chips, user_id))
+        db.x("INSERT INTO slot_purchases(user_id, request_id, chips, xp, balance_after) VALUES(?,?,?,?,?)", (user_id, request_id, chips, price, balance))
+        acc = db.one("SELECT * FROM slot_accounts WHERE user_id=?", (user_id,))
+    return {"chips": chips, "xp": price, "balance": balance, "replayed": False, "exchange": _exchange(acc)}
+
+
 def get_state(user_id: int) -> dict:
     with db.tx():
         acc = ensure_account(user_id)
-    return {"balance": acc["balance"], "bets": list(BETS), "min_bet": min(BETS),
+    return {"balance": acc["balance"], "exchange": _exchange(acc), "bets": list(BETS), "min_bet": min(BETS),
             "daily": {"available": can_claim_daily(acc), "amount": DAILY_BONUS, "next_day": _next_daily_day()},
             "stats": stats_of(acc), "history": history(user_id, 10), "meta": meta()}
 
@@ -253,5 +294,6 @@ def leaderboard() -> list[dict]:
 
 def delete_user_slot_data(user_id: int):
     db.x("DELETE FROM slot_spins WHERE user_id=?", (user_id,))
+    db.x("DELETE FROM slot_purchases WHERE user_id=?", (user_id,))
     db.x("DELETE FROM slot_accounts WHERE user_id=?", (user_id,))
     _last_spin.pop(user_id, None)

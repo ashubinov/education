@@ -179,9 +179,23 @@ CREATE TABLE IF NOT EXISTS slot_accounts(
   wagered_total INTEGER NOT NULL DEFAULT 0,
   wins_count INTEGER NOT NULL DEFAULT 0,
   best_win INTEGER NOT NULL DEFAULT 0,
+  xp_spent INTEGER NOT NULL DEFAULT 0,
+  bought_day TEXT,
+  bought_today INTEGER NOT NULL DEFAULT 0,
   created_at TEXT DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
+CREATE TABLE IF NOT EXISTS slot_purchases(
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL,
+  request_id TEXT,
+  chips INTEGER NOT NULL,
+  xp INTEGER NOT NULL,
+  balance_after INTEGER NOT NULL,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_slot_buy_req ON slot_purchases(user_id, request_id) WHERE request_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_slot_buy_user ON slot_purchases(user_id, id DESC);
 CREATE TABLE IF NOT EXISTS slot_spins(
   id INTEGER PRIMARY KEY,
   user_id INTEGER NOT NULL,
@@ -224,7 +238,8 @@ class DB:
             return {r[1] for r in self.conn.execute(f"PRAGMA table_info({t})")}
         for table, col, ddl in (("users", "token_version", "INTEGER DEFAULT 0"), ("courses", "catalog_no", "INTEGER"),
                                 ("courses", "origin_id", "INTEGER"), ("courses", "is_template", "INTEGER DEFAULT 0"),
-                                ("users", "banned", "INTEGER DEFAULT 0"), ("users", "banned_reason", "TEXT"), ("users", "banned_at", "TEXT")):
+                                ("slot_accounts", "xp_spent", "INTEGER NOT NULL DEFAULT 0"), ("slot_accounts", "bought_day", "TEXT"),
+                                ("slot_accounts", "bought_today", "INTEGER NOT NULL DEFAULT 0"), ("users", "banned", "INTEGER DEFAULT 0"), ("users", "banned_reason", "TEXT"), ("users", "banned_at", "TEXT")):
             if col not in cols(table):
                 self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
         self.conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_catalog_no ON courses(catalog_no) WHERE catalog_no IS NOT NULL")

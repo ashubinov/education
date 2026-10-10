@@ -16,7 +16,7 @@ from . import auth, avatars, backup, catalog, config, engine, generator, notifie
 from . import gamification as gm
 from .db import db, jd, jl
 from .llm import llm
-from .schemas import AnswerIn, BanIn, FriendRequestIn, GoalIn, LoginIn, MeUpdate, PasswordChangeIn, PublishIn, RegisterIn, SettingsUpdate, SignatureIn, SlotSpinIn, StartIn, UsernameChangeIn
+from .schemas import AnswerIn, BanIn, FriendRequestIn, GoalIn, LoginIn, MeUpdate, PasswordChangeIn, PublishIn, RegisterIn, SettingsUpdate, SignatureIn, SlotBuyIn, SlotSpinIn, StartIn, UsernameChangeIn
 
 MAX_REQUEST_MB = 80
 
@@ -684,6 +684,12 @@ async def slots_state(request: Request):
 @app.post("/api/slots/spin")
 async def slots_spin(request: Request, body: SlotSpinIn):
     return await run_in_threadpool(slots.spin, me(request)["id"], body.bet, body.request_id)
+
+
+@app.post("/api/slots/buy")
+async def slots_buy(request: Request, body: SlotBuyIn):
+    """Докупить жетоны за XP (фиксированные пакеты, дневной лимит)."""
+    return await run_in_threadpool(slots.buy_chips, me(request)["id"], body.chips, body.request_id)
 
 
 @app.post("/api/slots/daily")
