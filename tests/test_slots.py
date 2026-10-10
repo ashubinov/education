@@ -130,7 +130,7 @@ st = a.get("/api/slots/state").json()
 assert st["balance"] == S.START_BALANCE and st["bets"] == list(S.BETS) and st["daily"]["available"] and st["history"] == []
 assert st["stats"] == {"spins": 0, "won_total": 0, "wagered_total": 0, "best_win": 0, "win_rate": 0.0}
 assert {s["id"] for s in st["meta"]["symbols"]} == set(S.SYMBOLS) and len(st["meta"]["lines"]) == 10
-assert st["min_bet"] == 10 and st["max_bet"] == S.MAX_BET == 10000 and st["bet_step"] == 10 and st["bets"][-1] == 10000
+assert st["min_bet"] == 10 and st["max_bet"] == S.MAX_BET == 100000 and st["bet_step"] == 10 and st["bets"][-1] == 100000
 for bad in (15, 25, 5, 0, -10, S.MAX_BET + 10, S.MAX_BET * 2):  # не кратна 10 или вне допустимых пределов
     r = a.post("/api/slots/spin", json={"bet": bad})
     assert r.status_code in (400, 422), (bad, r.status_code)
@@ -310,7 +310,13 @@ if db_path:
     assert big["bet"] == 5000 and big["balance"] == 50000 - 5000 + big["payout"] and big["payout"] % 500 == 0, big  # линия = 500, все выплаты кратны ей
     top = f.post("/api/slots/spin", json={"bet": 10000}).json()
     assert top["bet"] == 10000 and top["balance"] == big["balance"] - 10000 + top["payout"]
-print("OK: своя ставка (кратная 10, от 10 до 10 000)")
+    con = sqlite3.connect(db_path, timeout=30)
+    con.execute("UPDATE slot_accounts SET balance=1000000 WHERE user_id=?", (uf["id"],))
+    con.commit()
+    con.close()
+    mx = f.post("/api/slots/spin", json={"bet": 100000}).json()  # самая большая ставка
+    assert mx["bet"] == 100000 and mx["balance"] == 1000000 - 100000 + mx["payout"] and mx["payout"] % 10000 == 0, mx
+print("OK: своя ставка (кратная 10, от 10 до 100 000)")
 
 # друзья видят, сколько игрок потратил на слоты
 g, ug = reg("slotg")
@@ -319,7 +325,7 @@ f.post("/api/friends/request", json={"username": ug["username"]})
 g.post(f"/api/friends/{uf['id']}/accept")
 prof = g.get(f"/api/friends/{uf['id']}").json()["slots"]
 sf = f.get("/api/slots/state").json()["stats"]
-assert prof["spins"] == sf["spins"] == 4 and prof["wagered"] == sf["wagered_total"] == 70 + 130 + 5000 + 10000, (prof, sf)
+assert prof["spins"] == sf["spins"] == 5 and prof["wagered"] == sf["wagered_total"] == 70 + 130 + 5000 + 10000 + 100000, (prof, sf)
 assert prof["won"] == sf["won_total"] and prof["net"] == prof["won"] - prof["wagered"] and prof["best_win"] == sf["best_win"]
 assert f.get(f"/api/friends/{ug['id']}").json()["slots"] is None, "кто не играл — slots: null"
 assert a.get(f"/api/friends/{uf['id']}").status_code == 404, "не друзьям статистика слотов недоступна"
