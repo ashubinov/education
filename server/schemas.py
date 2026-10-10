@@ -106,3 +106,8 @@ class BanIn(Strict):
 class UsernameChangeIn(Strict):
     username: str = Field(pattern=LOGIN_RE, description="3–32 символа: буквы, цифры, . _ -")
     password: str = Field(min_length=1, max_length=128)
+
+
+class SlotSpinIn(Strict):
+    bet: int = Field(ge=1, le=100000)
+    request_id: Optional[str] = Field(None, pattern=r"^[A-Za-z0-9_-]{8,64}$", description="уникальный номер вращения от клиента: повтор запроса не спишет ставку второй раз")

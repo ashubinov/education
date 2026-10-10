@@ -29,6 +29,7 @@ CHECKS = [
     ("tests/test_social.py", True, False),
     ("tests/test_backup.py", True, False),
     ("tests/test_account.py", True, False),
+    ("tests/test_slots.py", True, False),
     ("tests/test_catalog_admin.py", True, True),
     ("tests/verify_catalog.py", True, True),
 ]
@@ -44,7 +45,7 @@ def env_for(tmp: str) -> dict:
     e = dict(os.environ)
     e.update({"LQ_DB": os.path.join(tmp, "test.db"), "DATA_DIR": tmp, "LLM_MOCK": "1", "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8",
               "TELEGRAM_BOT_TOKEN": "", "OPENROUTER_API_KEY": "", "DEEPSEEK_API_KEY": "",
-              "ADMIN_USERNAME": "", "ALLOW_REGISTRATION": "1", "CORS_ORIGINS": "https://ashubinov.github.io", "JWT_SECRET": "ci-test-secret", "BACKUP_ENABLED": "0", "BACKUP_KEEP": "3"})
+              "ADMIN_USERNAME": "", "ALLOW_REGISTRATION": "1", "CORS_ORIGINS": "https://ashubinov.github.io", "JWT_SECRET": "ci-test-secret", "BACKUP_ENABLED": "0", "BACKUP_KEEP": "3", "SLOTS_MIN_INTERVAL": "0"})
     return e
 
 

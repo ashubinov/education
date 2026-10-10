@@ -170,6 +170,33 @@ CREATE TABLE IF NOT EXISTS avatars(
   data BLOB NOT NULL,
   updated_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
+CREATE TABLE IF NOT EXISTS slot_accounts(
+  user_id INTEGER PRIMARY KEY,
+  balance INTEGER NOT NULL,
+  last_daily_day TEXT,
+  spins_total INTEGER NOT NULL DEFAULT 0,
+  won_total INTEGER NOT NULL DEFAULT 0,
+  wagered_total INTEGER NOT NULL DEFAULT 0,
+  wins_count INTEGER NOT NULL DEFAULT 0,
+  best_win INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS slot_spins(
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL,
+  request_id TEXT,
+  bet INTEGER NOT NULL,
+  reels TEXT NOT NULL,
+  lines TEXT DEFAULT '{}',
+  payout INTEGER NOT NULL,
+  net INTEGER NOT NULL,
+  balance_after INTEGER NOT NULL,
+  win_tier TEXT DEFAULT 'none',
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS ix_slot_spins_user ON slot_spins(user_id, id DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_slot_spins_req ON slot_spins(user_id, request_id) WHERE request_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS ix_friend_addr ON friendships(addressee_id, status);
 CREATE INDEX IF NOT EXISTS ix_sign_status ON signatures(status, created_at);
 CREATE INDEX IF NOT EXISTS ix_modules_course ON modules(course_id, idx);

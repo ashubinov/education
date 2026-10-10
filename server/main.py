@@ -12,11 +12,11 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Res
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
-from . import auth, avatars, backup, catalog, config, engine, generator, notifier, service, social, supplement, tgbot
+from . import auth, avatars, backup, catalog, config, engine, generator, notifier, service, slots, social, supplement, tgbot
 from . import gamification as gm
 from .db import db, jd, jl
 from .llm import llm
-from .schemas import AnswerIn, BanIn, FriendRequestIn, GoalIn, LoginIn, MeUpdate, PasswordChangeIn, PublishIn, RegisterIn, SettingsUpdate, SignatureIn, StartIn, UsernameChangeIn
+from .schemas import AnswerIn, BanIn, FriendRequestIn, GoalIn, LoginIn, MeUpdate, PasswordChangeIn, PublishIn, RegisterIn, SettingsUpdate, SignatureIn, SlotSpinIn, StartIn, UsernameChangeIn
 
 MAX_REQUEST_MB = 80
 
@@ -673,6 +673,33 @@ async def admin_backup_download(name: str, request: Request):
     if not p:
         raise HTTPException(404, "Копия не найдена")
     return FileResponse(p, media_type="application/gzip", filename=name)
+
+
+# =============================================================== слоты (виртуальные жетоны, расчёт только на сервере)
+@app.get("/api/slots/state")
+async def slots_state(request: Request):
+    return await run_in_threadpool(slots.get_state, me(request)["id"])
+
+
+@app.post("/api/slots/spin")
+async def slots_spin(request: Request, body: SlotSpinIn):
+    return await run_in_threadpool(slots.spin, me(request)["id"], body.bet, body.request_id)
+
+
+@app.post("/api/slots/daily")
+async def slots_daily(request: Request):
+    return await run_in_threadpool(slots.claim_daily, me(request)["id"])
+
+
+@app.get("/api/slots/history")
+async def slots_history(request: Request, limit: int = 20):
+    return await run_in_threadpool(slots.history, me(request)["id"], limit)
+
+
+@app.get("/api/slots/leaderboard")
+async def slots_leaderboard(request: Request):
+    me(request)
+    return await run_in_threadpool(slots.leaderboard)
 
 
 # =============================================================== статистика
