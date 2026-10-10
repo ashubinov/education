@@ -14,6 +14,9 @@ from starlette.concurrency import run_in_threadpool
 
 from . import auth, avatars, backup, catalog, config, engine, generator, notifier, service, slots, social, supplement, tgbot
 from . import gamification as gm
+from . import chat
+from . import chat_commands
+from . import minigames
 from .db import db, jd, jl
 from .llm import llm
 from .schemas import THEME_DEFAULT, AnswerIn, BanIn, FriendRequestIn, GoalIn, LoginIn, MeUpdate, PasswordChangeIn, PublishIn, RegisterIn, SettingsUpdate, SignatureIn, SlotBuyIn, SlotSpinIn, StartIn, UsernameChangeIn
@@ -23,6 +26,9 @@ MAX_REQUEST_MB = 80
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    chat.init_schema()
+    chat_commands.init_schema()
+    minigames.init_schema()
     generator.set_loop(asyncio.get_running_loop())
     catalog.system_user_id()
     # восстановление после перезапуска
@@ -46,13 +52,24 @@ async def lifespan(app: FastAPI):
     tgbot.start()
     notifier.start()
     backup.start()
-    yield
+    strawberry_task = asyncio.create_task(minigames.expiry_loop())
+    try:
+        yield
+    finally:
+        strawberry_task.cancel()
+        try:
+            await strawberry_task
+        except asyncio.CancelledError:
+            pass
     await tgbot.stop()
     await notifier.stop()
     await backup.stop()
 
 
 app = FastAPI(title="LearnQuest API", lifespan=lifespan, docs_url="/api/docs", redoc_url=None, openapi_url="/api/openapi.json")
+app.include_router(chat.router)
+app.include_router(chat_commands.router)
+app.include_router(minigames.router)
 
 # ---------- CORS: фронт на GitHub Pages ходит на этот бэкенд с другого домена; авторизация — Bearer-токеном, куки не нужны ----------
 _local = [f"http://127.0.0.1:{config.PORT}", f"http://localhost:{config.PORT}"]
