@@ -130,7 +130,10 @@ st = a.get("/api/slots/state").json()
 assert st["balance"] == S.START_BALANCE and st["bets"] == list(S.BETS) and st["daily"]["available"] and st["history"] == []
 assert st["stats"] == {"spins": 0, "won_total": 0, "wagered_total": 0, "best_win": 0, "win_rate": 0.0}
 assert {s["id"] for s in st["meta"]["symbols"]} == set(S.SYMBOLS) and len(st["meta"]["lines"]) == 10
-assert a.post("/api/slots/spin", json={"bet": 15}).status_code == 400          # ставка не из списка
+assert st["min_bet"] == 10 and st["max_bet"] == 1000 and st["bet_step"] == 10
+for bad in (15, 25, 5, 0, -10, 1010, 2000):  # не кратна 10 или вне допустимых пределов
+    r = a.post("/api/slots/spin", json={"bet": bad})
+    assert r.status_code in (400, 422), (bad, r.status_code)
 assert a.post("/api/slots/spin", json={"bet": 10, "request_id": "short"}).status_code == 422
 assert a.post("/api/slots/spin", json={"bet": 10, "request_id": "bad id with spaces!!"}).status_code == 422
 assert a.post("/api/slots/spin", json={"bet": "много"}).status_code == 422
@@ -287,6 +290,18 @@ finally:
     S.DAILY_BUY_LIMIT, S.BUY_ONLY_BELOW = None, None
     S.delete_user_slot_data(910002)
 print("OK: покупка жетонов за XP — фиксированные цены, повторы, гонки, уровень не страдает, лимиты (выключены по умолчанию)")
+
+# ---------- своя ставка ----------
+f, uf = reg("slotf")
+c70 = f.post("/api/slots/spin", json={"bet": 70, "request_id": "custom-bet-070"}).json()
+assert c70["bet"] == 70 and c70["net"] == c70["payout"] - 70 and c70["balance"] == S.START_BALANCE - 70 + c70["payout"], c70
+c130 = f.post("/api/slots/spin", json={"bet": 130}).json()
+assert c130["bet"] == 130 and c130["balance"] == c70["balance"] - 130 + c130["payout"]
+r = f.post("/api/slots/spin", json={"bet": 1000})
+assert (r.status_code == 200) == (c130["balance"] >= 1000), r.text  # при нехватке жетонов — отказ, баланс не трогается
+if r.status_code == 400:
+    assert f.get("/api/slots/state").json()["balance"] == c130["balance"]
+print("OK: своя ставка (кратная 10, от 10 до 1000)")
 
 # таблица лидеров и удаление пользователя
 lb = a.get("/api/slots/leaderboard").json()

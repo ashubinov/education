@@ -20,7 +20,8 @@ from . import gamification as gm
 from .db import db
 
 # ----------------------------------------------------------------------------- настройки (позже легко вынести в конфиг)
-BETS = (10, 20, 50)           # кратны числу линий
+BETS = (10, 20, 50, 100, 200, 500, 1000)   # быстрые ставки; можно выбрать и свою сумму
+MIN_BET, MAX_BET, BET_STEP = 10, 1000, 10   # своя ставка: от 10 до 1000, кратна 10 (ставка делится поровну на 10 линий)
 START_BALANCE = 1000
 DAILY_BONUS = 100
 REELS, ROWS = 5, 3
@@ -186,8 +187,10 @@ def _spin_view(row: dict) -> dict:
 
 
 def spin(user_id: int, bet: int, request_id: str | None = None) -> dict:
-    if bet not in BETS:
-        raise HTTPException(400, "Недопустимая ставка. Доступно: " + ", ".join(map(str, BETS)))
+    if bet % BET_STEP:
+        raise HTTPException(400, f"Ставка должна делиться на {BET_STEP}: она распределяется поровну между {len(LINES)} линиями")
+    if not MIN_BET <= bet <= MAX_BET:
+        raise HTTPException(400, f"Ставка — от {MIN_BET} до {MAX_BET} жетонов")
     min_gap = float(config.env("SLOTS_MIN_INTERVAL", "0.4") or 0)
     with db.tx():  # блокировка БД: параллельные вращения одного пользователя выстраиваются в очередь
         now = time.monotonic()  # время берём уже под блокировкой, иначе очередь может «вернуть» часы назад и дать ложный отказ
@@ -274,7 +277,7 @@ def buy_chips(user_id: int, chips: int, request_id: str | None = None) -> dict:
 def get_state(user_id: int) -> dict:
     with db.tx():
         acc = ensure_account(user_id)
-    return {"balance": acc["balance"], "exchange": _exchange(acc), "bets": list(BETS), "min_bet": min(BETS),
+    return {"balance": acc["balance"], "exchange": _exchange(acc), "bets": list(BETS), "min_bet": MIN_BET, "max_bet": MAX_BET, "bet_step": BET_STEP,
             "daily": {"available": can_claim_daily(acc), "amount": DAILY_BONUS, "next_day": _next_daily_day()},
             "stats": stats_of(acc), "history": history(user_id, 10), "meta": meta()}
 
