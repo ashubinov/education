@@ -213,8 +213,8 @@ print("OK: параллельные запросы (повторы и разны
 d, ud = reg("slotd")
 ex = d.get("/api/slots/state").json()["exchange"]
 assert ex["xp_per_chip"] == S.XP_PER_CHIP and [p["chips"] for p in ex["packs"]] == list(S.PACKS) and all(p["xp"] == p["chips"] * S.XP_PER_CHIP for p in ex["packs"])
-assert ex["xp_available"] == 0 and ex["remaining_today"] == S.DAILY_BUY_LIMIT
-assert d.post("/api/slots/buy", json={"chips": 50}).status_code == 400, "без XP купить нельзя (и баланс ещё высокий)"
+assert ex["xp_available"] == 0
+assert d.post("/api/slots/buy", json={"chips": 50}).status_code == 400, "без XP купить нельзя"
 assert d.post("/api/slots/buy", json={"chips": 33}).status_code == 400, "только фиксированные пакеты"
 assert d.post("/api/slots/buy", json={"chips": 50, "request_id": "x"}).status_code == 422
 assert httpx.post(BASE + "/api/slots/buy", json={"chips": 50}).status_code == 401
@@ -226,41 +226,27 @@ if db_path:
                     (uid, 0, time.strftime("%Y-%m-%d"), n, n))
         con.commit()
 
-    def set_balance(uid, n):
-        con.execute("UPDATE slot_accounts SET balance=? WHERE user_id=?", (n, uid))
-        con.commit()
-
     grant_xp(ud["id"], 500)
     lvl_before = d.get("/api/me").json()["level"]
-    r = d.post("/api/slots/buy", json={"chips": 50})
-    assert r.status_code == 400 and "меньше" in r.json()["detail"], "пока жетонов много, докупать нельзя"
-    set_balance(ud["id"], 100)
     r = d.post("/api/slots/buy", json={"chips": 50, "request_id": "buy-req-0001"})
-    assert r.status_code == 200, r.text
+    assert r.status_code == 200, r.text  # жетонов много (1000), и это не мешает: ограничений по балансу нет
     b1 = r.json()
-    assert b1["balance"] == 150 and b1["xp"] == 50 * S.XP_PER_CHIP and b1["exchange"]["xp_available"] == 500 - 50 * S.XP_PER_CHIP and b1["exchange"]["bought_today"] == 50
+    price = 50 * S.XP_PER_CHIP
+    assert b1["balance"] == S.START_BALANCE + 50 and b1["xp"] == price and b1["exchange"]["xp_available"] == 500 - price and b1["exchange"]["bought_today"] == 50
     again = d.post("/api/slots/buy", json={"chips": 50, "request_id": "buy-req-0001"}).json()
-    assert again["replayed"] is True and again["balance"] == 150 and d.get("/api/slots/state").json()["exchange"]["xp_available"] == 500 - 50 * S.XP_PER_CHIP, "повтор запроса не списывает XP второй раз"
+    assert again["replayed"] is True and again["balance"] == b1["balance"] and d.get("/api/slots/state").json()["exchange"]["xp_available"] == 500 - price, "повтор запроса не списывает XP второй раз"
     assert d.get("/api/me").json()["level"] == lvl_before, "траты XP не меняют уровень"
     r = d.post("/api/slots/buy", json={"chips": 100})
     assert r.status_code == 400 and "XP" in r.json()["detail"], "100 жетонов стоят дороже, чем осталось XP"
     grant_xp(ud["id"], 5000)
-    assert d.post("/api/slots/buy", json={"chips": 100}).status_code == 200
-    assert d.post("/api/slots/buy", json={"chips": 50}).status_code == 200
-    r = d.post("/api/slots/buy", json={"chips": 50})
-    assert r.status_code == 400 and "меньше" in r.json()["detail"], "баланс дорос до 300 — докупать больше нельзя"
-    set_balance(ud["id"], 100)
-    r = d.post("/api/slots/buy", json={"chips": 50})
-    assert r.status_code == 400 and "лимит" in r.json()["detail"], r.text  # 50 + 100 + 50 = 200, лимит исчерпан
-    set_balance(ud["id"], 300)
+    for chips in (100, 200, 200, 50):  # сколько угодно, пока хватает XP
+        assert d.post("/api/slots/buy", json={"chips": chips}).status_code == 200
     st = d.get("/api/slots/state").json()
-    assert st["balance"] == 100 + 200 and st["exchange"]["remaining_today"] == 0 and st["exchange"]["bought_today"] == 200
-    assert st["exchange"]["xp_spent"] == 200 * S.XP_PER_CHIP and st["exchange"]["xp_total"] == 5500
-    # гонка: много параллельных покупок при лимите 200 в сутки — пройдёт ровно столько, сколько позволяет лимит
+    assert st["balance"] == S.START_BALANCE + 50 + 550 and st["exchange"]["xp_spent"] == 600 * S.XP_PER_CHIP and st["exchange"]["xp_total"] == 5500
+    assert st["exchange"]["daily_limit"] is None and st["exchange"]["remaining_today"] is None
+    # гонка: параллельные покупки не уводят XP в минус — проходит ровно столько, на сколько хватает XP
     e, ue = reg("slote")
-    grant_xp(ue["id"], 10_000)
-    e.get("/api/slots/state")
-    set_balance(ue["id"], 100)
+    grant_xp(ue["id"], 3 * 50 * S.XP_PER_CHIP)
     out = []
 
     def buy_it(i):
@@ -270,12 +256,37 @@ if db_path:
     ths = [threading.Thread(target=buy_it, args=(i,)) for i in range(8)]
     [t.start() for t in ths]
     [t.join() for t in ths]
-    assert out.count(200) == 4 and out.count(400) == 4, out
+    assert out.count(200) == 3 and out.count(400) == 5, out
     ste = e.get("/api/slots/state").json()
-    assert ste["balance"] == 100 + 200, ste["balance"]
-    assert ste["exchange"]["bought_today"] == 200 and ste["exchange"]["xp_spent"] == 200 * S.XP_PER_CHIP
+    assert ste["balance"] == S.START_BALANCE + 150 and ste["exchange"]["xp_available"] == 0 and ste["exchange"]["xp_spent"] == 150 * S.XP_PER_CHIP
     con.close()
-print("OK: покупка жетонов за XP — фиксированные цены, лимиты, повторы, гонки, уровень не страдает")
+# необязательные ограничения (по умолчанию выключены) на уровне модуля
+S.DAILY_BUY_LIMIT, S.BUY_ONLY_BELOW = 100, 300
+try:
+    uid2 = 910002
+    S.ensure_account(uid2)
+    if db_path:
+        con = sqlite3.connect(db_path, timeout=30)
+        con.execute("INSERT INTO activity(user_id, course_id, day, xp, lessons) VALUES(?,?,?,?,1)", (uid2, 0, time.strftime("%Y-%m-%d"), 100000))
+        con.commit()
+        con.close()
+        try:
+            S.buy_chips(uid2, 50)
+            raise AssertionError("при включённом пороге 300 покупка при балансе 1000 должна быть отклонена")
+        except HTTPException as ex_:
+            assert "меньше" in ex_.detail
+        S.BUY_ONLY_BELOW = None
+        S.buy_chips(uid2, 50)
+        S.buy_chips(uid2, 50)
+        try:
+            S.buy_chips(uid2, 50)
+            raise AssertionError("дневной лимит 100 должен сработать")
+        except HTTPException as ex_:
+            assert "лимит" in ex_.detail
+finally:
+    S.DAILY_BUY_LIMIT, S.BUY_ONLY_BELOW = None, None
+    S.delete_user_slot_data(910002)
+print("OK: покупка жетонов за XP — фиксированные цены, повторы, гонки, уровень не страдает, лимиты (выключены по умолчанию)")
 
 # таблица лидеров и удаление пользователя
 lb = a.get("/api/slots/leaderboard").json()
@@ -286,7 +297,7 @@ if db_path:
     con = sqlite3.connect(db_path, timeout=30)
     cnt = lambda t, u: con.execute(f"SELECT COUNT(*) FROM {t} WHERE user_id=?", (u,)).fetchone()[0]  # noqa: E731
     assert cnt("slot_accounts", uc["id"]) == 1 and cnt("slot_spins", uc["id"]) == 13
-    assert cnt("slot_purchases", ud["id"]) == 3
+    assert cnt("slot_purchases", ud["id"]) == 5
     assert adm.delete(f"/api/admin/users/{uc['id']}").status_code == 200
     assert cnt("slot_accounts", uc["id"]) == 0 and cnt("slot_spins", uc["id"]) == 0, "данные слотов удалённого пользователя должны исчезнуть"
     assert adm.delete(f"/api/admin/users/{ud['id']}").status_code == 200 and cnt("slot_purchases", ud["id"]) == 0 and cnt("slot_accounts", ud["id"]) == 0

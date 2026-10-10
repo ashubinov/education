@@ -67,6 +67,19 @@ cur = a.get("/api/me").json()["avatar_url"]
 assert a.delete("/api/me/avatar").json()["avatar_url"] is None and httpx.get(BASE + cur).status_code == 404
 print("OK: друзья и админ видят аватарку, удаление возвращает эмодзи")
 
+# ---------- оформление (тема) ----------
+assert ua["theme_extra"] == {"preset": "", "bg": "glow", "radius": "normal", "motion": "full"}, ua["theme_extra"]
+r = a.put("/api/me", json={"theme_color": "#06b6d4", "theme_extra": {"preset": "ocean", "bg": "tint", "radius": "round", "motion": "reduced"}})
+assert r.status_code == 200 and r.json()["theme_extra"] == {"preset": "ocean", "bg": "tint", "radius": "round", "motion": "reduced"}, r.text
+assert a.get("/api/me").json()["theme_extra"]["bg"] == "tint" and a.get("/api/me").json()["theme_color"] == "#06b6d4", "тема сохраняется на сервере"
+assert a.put("/api/me", json={"theme_extra": {"bg": "solid"}}).json()["theme_extra"] == {"preset": "", "bg": "solid", "radius": "normal", "motion": "full"}, "не указанное берётся по умолчанию"
+for bad in ({"bg": "neon"}, {"radius": "huge"}, {"motion": "none"}, {"preset": "Bad Name!"}, {"preset": "x" * 30}):
+    assert a.put("/api/me", json={"theme_extra": bad}).status_code == 422, bad
+assert a.get("/api/me").json()["theme_extra"]["bg"] == "solid", "неверные значения не меняют сохранённую тему"
+assert b.get("/api/me").json()["theme_extra"]["bg"] == "glow", "тема у каждого пользователя своя"
+a.put("/api/me", json={"theme_color": "#7c5cff", "theme_extra": {}})
+print("OK: оформление хранится на сервере и проверяется")
+
 # ---------- смена логина
 new = f"newname{tag}"
 assert a.put("/api/me/username", json={"username": new, "password": "wrong"}).status_code == 400

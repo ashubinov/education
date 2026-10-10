@@ -27,11 +27,23 @@ class PasswordChangeIn(Strict):
     new_password: str = Field(min_length=6, max_length=128)
 
 
+class ThemeExtra(Strict):
+    """Дополнительные настройки оформления (цвет и светлая/тёмная тема хранятся отдельно)."""
+    preset: str = Field("", max_length=20, pattern=r"^[a-z0-9_-]*$")
+    bg: Literal["glow", "solid", "tint", "amoled"] = "glow"
+    radius: Literal["sharp", "normal", "round"] = "normal"
+    motion: Literal["full", "reduced"] = "full"
+
+
+THEME_DEFAULT = ThemeExtra().model_dump()
+
+
 class MeUpdate(Strict):
     display_name: Optional[str] = Field(None, min_length=1, max_length=40)
     avatar: Optional[str] = Field(None, min_length=1, max_length=8)
     theme_color: Optional[str] = Field(None, pattern=r"^#[0-9a-fA-F]{6}$")
     theme_mode: Optional[Literal["dark", "light", "auto"]] = None
+    theme_extra: Optional[ThemeExtra] = None
     sound: Optional[bool] = None
     reminders_on: Optional[bool] = None
     reminder_time: Optional[str] = Field(None, pattern=r"^([01]\d|2[0-3]):[0-5]\d$")

@@ -16,7 +16,7 @@ from . import auth, avatars, backup, catalog, config, engine, generator, notifie
 from . import gamification as gm
 from .db import db, jd, jl
 from .llm import llm
-from .schemas import AnswerIn, BanIn, FriendRequestIn, GoalIn, LoginIn, MeUpdate, PasswordChangeIn, PublishIn, RegisterIn, SettingsUpdate, SignatureIn, SlotBuyIn, SlotSpinIn, StartIn, UsernameChangeIn
+from .schemas import THEME_DEFAULT, AnswerIn, BanIn, FriendRequestIn, GoalIn, LoginIn, MeUpdate, PasswordChangeIn, PublishIn, RegisterIn, SettingsUpdate, SignatureIn, SlotBuyIn, SlotSpinIn, StartIn, UsernameChangeIn
 
 MAX_REQUEST_MB = 80
 
@@ -117,7 +117,7 @@ def user_public(u: dict) -> dict:
     xp = gm.total_xp(u["id"])
     out = {
         "id": u["id"], "username": u["username"], "display_name": u["display_name"] or u["username"], "avatar": u["avatar"],
-        "avatar_url": avatars.url(u["id"]), "theme_color": u["theme_color"], "theme_mode": u["theme_mode"], "sound": bool(u["sound"]),
+        "avatar_url": avatars.url(u["id"]), "theme_color": u["theme_color"], "theme_mode": u["theme_mode"], "theme_extra": {**THEME_DEFAULT, **(jl(u.get("theme_extra"), {}) or {})}, "sound": bool(u["sound"]),
         "reminders_on": bool(u["reminders_on"]), "reminder_time": u["reminder_time"], "is_admin": bool(u["is_admin"]),
         "telegram": bool(u["tg_chat_id"]), "level": gm.level_info(xp), "streak": gm.streak_info(u["id"]),
     }
@@ -202,6 +202,8 @@ async def update_me(request: Request, body: MeUpdate):
     for k in ("sound", "reminders_on"):
         if k in fields:
             fields[k] = int(fields[k])
+    if "theme_extra" in fields:
+        fields["theme_extra"] = jd(fields["theme_extra"])
     if fields:
         sets = ", ".join(f"{k}=?" for k in fields)
         db.x(f"UPDATE users SET {sets} WHERE id=?", (*fields.values(), u["id"]))

@@ -28,8 +28,8 @@ HISTORY_LIMIT = 50
 # покупка жетонов за XP: жёсткие фиксированные цены, без скидок за объём. Один урок даёт в среднем ≈145 XP, то есть ≈29 жетонов
 XP_PER_CHIP = 5
 PACKS = (50, 100, 200)       # жетонов в пакете; цена = жетоны × XP_PER_CHIP
-DAILY_BUY_LIMIT = 200        # не больше стольких купленных жетонов в сутки
-BUY_ONLY_BELOW = 300         # докупить можно, только если жетонов осталось меньше
+DAILY_BUY_LIMIT = None       # None — без дневного лимита; число — не больше стольких купленных жетонов в сутки
+BUY_ONLY_BELOW = None        # None — покупать можно всегда; число — только если жетонов осталось меньше этого
 LEADERBOARD_SIZE = 10
 
 WILD, SCATTER, BONUS = "wild", "scatter", "bonus"
@@ -189,8 +189,8 @@ def spin(user_id: int, bet: int, request_id: str | None = None) -> dict:
     if bet not in BETS:
         raise HTTPException(400, "Недопустимая ставка. Доступно: " + ", ".join(map(str, BETS)))
     min_gap = float(config.env("SLOTS_MIN_INTERVAL", "0.4") or 0)
-    now = time.monotonic()
     with db.tx():  # блокировка БД: параллельные вращения одного пользователя выстраиваются в очередь
+        now = time.monotonic()  # время берём уже под блокировкой, иначе очередь может «вернуть» часы назад и дать ложный отказ
         acc = ensure_account(user_id)
         if request_id:
             old = db.one("SELECT * FROM slot_spins WHERE user_id=? AND request_id=?", (user_id, request_id))
@@ -241,8 +241,8 @@ def _exchange(acc: dict) -> dict:
     spent = acc["xp_spent"]
     bought = acc["bought_today"] if acc["bought_day"] == gm.today() else 0
     return {"xp_per_chip": XP_PER_CHIP, "packs": [{"chips": c, "xp": c * XP_PER_CHIP} for c in PACKS], "xp_total": total, "xp_spent": spent,
-            "xp_available": max(0, total - spent), "bought_today": bought, "daily_limit": DAILY_BUY_LIMIT, "remaining_today": max(0, DAILY_BUY_LIMIT - bought),
-            "buy_only_below": BUY_ONLY_BELOW}
+            "xp_available": max(0, total - spent), "bought_today": bought, "daily_limit": DAILY_BUY_LIMIT,
+            "remaining_today": None if DAILY_BUY_LIMIT is None else max(0, DAILY_BUY_LIMIT - bought), "buy_only_below": BUY_ONLY_BELOW}
 
 
 def buy_chips(user_id: int, chips: int, request_id: str | None = None) -> dict:
@@ -257,9 +257,9 @@ def buy_chips(user_id: int, chips: int, request_id: str | None = None) -> dict:
             if old:
                 return {"chips": old["chips"], "xp": old["xp"], "balance": old["balance_after"], "replayed": True, "exchange": _exchange(acc)}
         ex = _exchange(acc)
-        if acc["balance"] >= BUY_ONLY_BELOW:
+        if BUY_ONLY_BELOW is not None and acc["balance"] >= BUY_ONLY_BELOW:
             raise HTTPException(400, f"Докупить можно, только когда жетонов меньше {BUY_ONLY_BELOW}")
-        if chips > ex["remaining_today"]:
+        if DAILY_BUY_LIMIT is not None and chips > ex["remaining_today"]:
             raise HTTPException(400, f"Дневной лимит покупок — {DAILY_BUY_LIMIT} жетонов, сегодня можно ещё {ex['remaining_today']}")
         if price > ex["xp_available"]:
             raise HTTPException(400, f"Не хватает XP: нужно {price}, доступно {ex['xp_available']}")
