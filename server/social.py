@@ -226,6 +226,18 @@ def ban(admin_id: int, uid: int, reason: str):
         pass
 
 
+def reset_password(admin_id: int, uid: int) -> str:
+    """Сбросить пароль пользователя: возвращает новый временный пароль (показывается администратору один раз)."""
+    u = db.one("SELECT * FROM users WHERE id=?", (uid,))
+    if not u or u["username"] == auth.SYSTEM_USERNAME:
+        raise HTTPException(404, "Пользователь не найден")
+    if uid == admin_id:
+        raise HTTPException(400, "Свой пароль меняется в настройках")
+    if u["is_admin"] or auth.is_admin_name(u["username"]):
+        raise HTTPException(400, "Пароль администратора сбросить нельзя")
+    return auth.admin_reset_password(uid)
+
+
 def unban(uid: int):
     if not db.one("SELECT 1 AS x FROM users WHERE id=? AND username<>?", (uid, auth.SYSTEM_USERNAME)):
         raise HTTPException(404, "Пользователь не найден")

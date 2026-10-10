@@ -29,6 +29,7 @@ CHECKS = [
     ("tests/test_social.py", True, False),
     ("tests/test_backup.py", True, False),
     ("tests/test_account.py", True, False),
+    ("tests/test_password_reset.py", True, False),
     ("tests/test_slots.py", True, False),
     ("tests/test_chat.py", True, False),
     ("tests/test_chat_commands.py", True, False),

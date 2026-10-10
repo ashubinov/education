@@ -105,7 +105,29 @@ def change_password(user_id: int, current: str, new: str, ip: str = ""):
     if hmac.compare_digest(current.encode(), new.encode()):
         raise HTTPException(400, "Новый пароль должен отличаться от текущего")
     salt = secrets.token_hex(16)
-    db.x("UPDATE users SET pass_hash=?, salt=?, token_version=COALESCE(token_version,0)+1 WHERE id=?", (_hash(new, salt), salt, user_id))
+    db.x("UPDATE users SET pass_hash=?, salt=?, must_change=0, token_version=COALESCE(token_version,0)+1 WHERE id=?", (_hash(new, salt), salt, user_id))
+
+
+_PW_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789"  # без похожих символов (0/O, 1/l/I)
+
+
+def temp_password() -> str:
+    """Временный пароль вида «Xk7P-m2Qd-Rw9F» (12 знаков, читается и набирается без ошибок)."""
+    raw = "".join(secrets.choice(_PW_ALPHABET) for _ in range(12))
+    return "-".join(raw[i:i + 4] for i in range(0, 12, 4))
+
+
+def admin_reset_password(user_id: int) -> str:
+    """Администратор сбрасывает пароль: старый перестаёт работать, все входы отзываются, пользователь обязан задать свой пароль при входе."""
+    pw = temp_password()
+    salt = secrets.token_hex(16)
+    db.x("UPDATE users SET pass_hash=?, salt=?, must_change=1, token_version=COALESCE(token_version,0)+1 WHERE id=?", (_hash(pw, salt), salt, user_id))
+    _attempts.pop(f"pwd|{user_id}|", None)
+    return pw
+
+
+# пока пароль временный, можно только сменить его (и посмотреть свой профиль): всё остальное API отвечает 403
+MUST_CHANGE_ALLOWED = ("/api/me", "/api/me/password", "/api/auth/logout-all")
 
 
 def change_username(user_id: int, new: str, password: str, ip: str = "") -> str:
@@ -165,4 +187,6 @@ def require_user(request: Request) -> dict:
         raise HTTPException(401, "Нужно войти")
     if u["banned"]:
         raise HTTPException(403, ban_message(u))
+    if u.get("must_change") and request.url.path not in MUST_CHANGE_ALLOWED:
+        raise HTTPException(403, "Нужно сменить временный пароль")
     return u

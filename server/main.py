@@ -136,6 +136,7 @@ def user_public(u: dict) -> dict:
         "id": u["id"], "username": u["username"], "display_name": u["display_name"] or u["username"], "avatar": u["avatar"],
         "avatar_url": avatars.url(u["id"]), "theme_color": u["theme_color"], "theme_mode": u["theme_mode"], "theme_extra": {**THEME_DEFAULT, **(jl(u.get("theme_extra"), {}) or {})}, "sound": bool(u["sound"]),
         "reminders_on": bool(u["reminders_on"]), "reminder_time": u["reminder_time"], "is_admin": bool(u["is_admin"]),
+        "must_change_password": bool(u.get("must_change")),
         "telegram": bool(u["tg_chat_id"]), "level": gm.level_info(xp), "streak": gm.streak_info(u["id"]),
     }
     if u["is_admin"]:
@@ -663,6 +664,13 @@ async def admin_delete_user(uid: int, request: Request):
     """Удалить пользователя навсегда со всеми его данными."""
     social.delete_user(admin(request)["id"], uid)
     return {"ok": True}
+
+
+@app.post("/api/admin/users/{uid}/reset-password")
+async def admin_reset_password(uid: int, request: Request):
+    """Сбросить пароль пользователя: вернёт новый временный пароль (один раз). При входе пользователь обязан задать свой."""
+    pw = await run_in_threadpool(social.reset_password, admin(request)["id"], uid)
+    return {"password": pw}
 
 
 @app.post("/api/admin/users/{uid}/unban")

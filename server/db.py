@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS users(
   theme_color TEXT DEFAULT '#7c5cff',
   theme_mode TEXT DEFAULT 'dark',
   theme_extra TEXT,
+  must_change INTEGER NOT NULL DEFAULT 0,
   sound INTEGER DEFAULT 1,
   reminders_on INTEGER DEFAULT 1,
   reminder_time TEXT DEFAULT '19:00',
@@ -240,7 +241,7 @@ class DB:
         for table, col, ddl in (("users", "token_version", "INTEGER DEFAULT 0"), ("courses", "catalog_no", "INTEGER"),
                                 ("courses", "origin_id", "INTEGER"), ("courses", "is_template", "INTEGER DEFAULT 0"),
                                 ("slot_accounts", "xp_spent", "INTEGER NOT NULL DEFAULT 0"), ("slot_accounts", "bought_day", "TEXT"),
-                                ("slot_accounts", "bought_today", "INTEGER NOT NULL DEFAULT 0"), ("users", "theme_extra", "TEXT"), ("users", "banned", "INTEGER DEFAULT 0"), ("users", "banned_reason", "TEXT"), ("users", "banned_at", "TEXT")):
+                                ("slot_accounts", "bought_today", "INTEGER NOT NULL DEFAULT 0"), ("users", "theme_extra", "TEXT"), ("users", "must_change", "INTEGER NOT NULL DEFAULT 0"), ("users", "banned", "INTEGER DEFAULT 0"), ("users", "banned_reason", "TEXT"), ("users", "banned_at", "TEXT")):
             if col not in cols(table):
                 self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
         self.conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_catalog_no ON courses(catalog_no) WHERE catalog_no IS NOT NULL")
