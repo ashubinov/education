@@ -76,7 +76,8 @@ def _identity(request: Request) -> dict:
 
 _SELECT = """SELECT m.id, m.user_id, m.text, m.created_at, m.system_kind,
                   u.display_name, u.username, u.avatar
-             FROM chat_messages m JOIN users u ON u.id=m.user_id"""
+             FROM chat_messages m JOIN users u ON u.id=m.user_id
+             WHERE COALESCE(u.banned,0)=0"""  # сообщения заблокированных пользователей в чате не показываются
 
 
 def _public(r: dict) -> dict:
@@ -95,7 +96,7 @@ def history(before_id: int | None = None) -> dict:
     if before_id is None:
         rows = db.q(_SELECT + " ORDER BY m.id DESC LIMIT ?", (HISTORY_SIZE,))
     else:
-        rows = db.q(_SELECT + " WHERE m.id<? ORDER BY m.id DESC LIMIT ?", (before_id, HISTORY_SIZE))
+        rows = db.q(_SELECT + " AND m.id<? ORDER BY m.id DESC LIMIT ?", (before_id, HISTORY_SIZE))
     return {"messages": [_public(r) for r in reversed(rows)], "cursor": cursor,
             "has_more": len(rows) == HISTORY_SIZE}
 
@@ -107,7 +108,7 @@ def updates(after: int) -> dict:
     for e in events:
         event = {"seq": e["id"], "kind": e["kind"], "message_id": e["message_id"]}
         if e["kind"] == "sent":
-            row = db.one(_SELECT + " WHERE m.id=?", (e["message_id"],))
+            row = db.one(_SELECT + " AND m.id=?", (e["message_id"],))
             if row:
                 event["message"] = _public(row)
             else:
@@ -135,7 +136,7 @@ def send(user_id: int, text: str, request_id: str) -> dict:
         old = db.one("SELECT id FROM chat_messages WHERE user_id=? AND request_id=?",
                      (user_id, request_id))
         if old:
-            row = db.one(_SELECT + " WHERE m.id=?", (old["id"],))
+            row = db.one(_SELECT + " AND m.id=?", (old["id"],))
             return {**_public(row), "replayed": True}
         recent = db.one("SELECT MAX(created_ts) AS last, COUNT(*) AS count FROM chat_messages "
                         "WHERE user_id=? AND created_ts>=?", (user_id, now - 60))
@@ -147,7 +148,7 @@ def send(user_id: int, text: str, request_id: str) -> dict:
         mid = db.x("INSERT INTO chat_messages(user_id,request_id,text,created_ts,created_at) VALUES(?,?,?,?,?)",
                    (user_id, request_id, text, now, stamp))
         db.x("INSERT INTO chat_events(message_id,kind,created_ts) VALUES(?,'sent',?)", (mid, now))
-        row = db.one(_SELECT + " WHERE m.id=?", (mid,))
+        row = db.one(_SELECT + " AND m.id=?", (mid,))
     return {**_public(row), "replayed": False}
 
 
@@ -167,6 +168,36 @@ async def chat_updates(request: Request, after: int = Query(0, ge=0)):
 async def chat_send(request: Request, body: MessageIn):
     user = _identity(request)
     return await run_in_threadpool(send, user["id"], body.text, body.request_id)
+
+
+def delete_message(message_id: int) -> dict:
+    """Удаление сообщения администратором: пропадает из истории, а открытые окна чата получают событие «deleted»."""
+    now = int(time.time())
+    with db.tx():
+        if not db.one("SELECT id FROM chat_messages WHERE id=?", (message_id,)):
+            raise HTTPException(404, "Сообщение не найдено")
+        db.x("DELETE FROM chat_messages WHERE id=?", (message_id,))
+        db.x("UPDATE chat_command_uses SET message_id=NULL WHERE message_id=?", (message_id,))
+        db.x("INSERT INTO chat_events(message_id,kind,created_ts) VALUES(?,'deleted',?)", (message_id, now))
+    return {"ok": True, "id": message_id}
+
+
+def hide_user_messages(user_id: int) -> int:
+    """При блокировке пользователя его сообщения исчезают у всех, кто сейчас в чате (в истории они скрыты запросом)."""
+    now = int(time.time())
+    with db.tx():
+        ids = [r["id"] for r in db.q("SELECT id FROM chat_messages WHERE user_id=?", (user_id,))]
+        for mid in ids:
+            db.x("INSERT INTO chat_events(message_id,kind,created_ts) VALUES(?,'deleted',?)", (mid, now))
+    return len(ids)
+
+
+@router.delete("/messages/{message_id}")
+async def chat_delete(message_id: int, request: Request):
+    user = _identity(request)
+    if not user["is_admin"]:
+        raise HTTPException(403, "Удалять сообщения может только администратор")
+    return await run_in_threadpool(delete_message, message_id)
 
 
 # System announcements are written only by trusted server modules, within db.tx().

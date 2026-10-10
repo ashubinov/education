@@ -151,6 +151,35 @@ def set_enabled(cid: int, enabled: bool):
     return {"id": cid, "enabled": enabled}
 
 
+def update(cid: int, body: CommandCreateIn):
+    """Администратор меняет команду целиком: текст, описание, сумму и паузу. Паузы игроков пересчитываются по новому значению."""
+    name = _normalize(body.command)
+    seconds = body.cooldown_value * UNITS[body.cooldown_unit]
+    if seconds > MAX_COOLDOWN:
+        raise HTTPException(422, "Максимальный таймаут — 30 суток")
+    desc = body.description.strip()
+    if len(desc) < 3:
+        raise HTTPException(422, "Добавь описание действия")
+    with db.tx():
+        if not db.one("SELECT id FROM chat_commands WHERE id=?", (cid,)):
+            raise HTTPException(404, "Команда не найдена")
+        if db.one("SELECT id FROM chat_commands WHERE command=? COLLATE NOCASE AND id<>?", (name, cid)):
+            raise HTTPException(409, "Команда с таким текстом уже существует")
+        db.x("""UPDATE chat_commands SET command=?, description=?, action=?, amount=?, cooldown_seconds=?, cooldown_value=?, cooldown_unit=?
+                WHERE id=?""", (name, desc, body.action, body.amount, seconds, body.cooldown_value, body.cooldown_unit, cid))
+    return {"id": cid, "command": name, "ok": True}
+
+
+def delete(cid: int):
+    """Удалить команду вместе с журналом её использования (уже начисленные жетоны остаются у игроков)."""
+    with db.tx():
+        if not db.one("SELECT id FROM chat_commands WHERE id=?", (cid,)):
+            raise HTTPException(404, "Команда не найдена")
+        db.x("DELETE FROM chat_command_uses WHERE command_id=?", (cid,))
+        db.x("DELETE FROM chat_commands WHERE id=?", (cid,))
+    return {"id": cid, "deleted": True}
+
+
 def _use_view(r: dict, *, replayed: bool):
     return {"command": r["command"], "chips": r["amount"], "balance": r["balance_after"],
             "message_id": r["message_id"], "replayed": replayed,
@@ -225,3 +254,15 @@ async def use_command(request: Request, body: CommandUseIn):
 async def enable_command(command_id: int, request: Request, enabled: bool):
     _admin(request)
     return await run_in_threadpool(set_enabled, command_id, enabled)
+
+
+@router.put("/{command_id}")
+async def update_command(command_id: int, request: Request, body: CommandCreateIn):
+    _admin(request)
+    return await run_in_threadpool(update, command_id, body)
+
+
+@router.delete("/{command_id}")
+async def delete_command(command_id: int, request: Request):
+    _admin(request)
+    return await run_in_threadpool(delete, command_id)

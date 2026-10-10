@@ -219,6 +219,11 @@ def ban(admin_id: int, uid: int, reason: str):
     if u["is_admin"] or auth.is_admin_name(u["username"]):
         raise HTTPException(400, "Администратора заблокировать нельзя")
     db.x("UPDATE users SET banned=1, banned_reason=?, banned_at=CURRENT_TIMESTAMP WHERE id=?", (reason.strip()[:200], uid))
+    try:
+        from . import chat  # здесь, чтобы не создавать цикл импорта
+        chat.hide_user_messages(uid)
+    except Exception:  # чат необязателен для блокировки (например, таблицы ещё не созданы в тесте модуля)
+        pass
 
 
 def unban(uid: int):
