@@ -285,6 +285,11 @@ def steal(thief_id: int, victim_id: int, amount: int, request_id: str) -> dict:
             VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
             (thief_id,victim_id,thief["username"],victim["username"],amount,fee,
              json.dumps(candidates,ensure_ascii=False),request_id,now,now+ANSWER_SECONDS,stamp))
+        # Server-only announcement: never reveal the thief before the victim guesses.
+        # Chat row + Telegram outbox are committed in the SAME DB transaction.
+        chat.post_system(
+            f"{_announcement_name(victim, victim['username'])}, ТЕБЯ КЛУБНИЧАТ ПРЯМО СЕЙЧАС!!!!!",
+            f"strawberry-start:{rid}", kind="strawberry")
         return {"id":rid,"amount":amount,"frozen":True,"reserved_fee":0,
                 "replayed":False,"balance":ta["balance"]}
 
@@ -358,3 +363,4 @@ async def post_guess(request: Request, body: GuessIn):
 
 # STRAWBERRY_RULES_20261011_V4
 # STRAWBERRY_CAUGHT_NAMES_20261011_V5
+# LQ_STRAWBERRY_START_NOTICE_20261011

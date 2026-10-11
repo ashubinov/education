@@ -16,6 +16,7 @@ from . import auth, avatars, backup, catalog, config, engine, generator, notifie
 from . import gamification as gm
 from . import chat
 from . import chat_commands
+from . import chat_telegram_relay
 from . import arena, farm, lab, minigames, pet, pixels
 from . import slots_meme
 from .db import db, jd, jl
@@ -29,6 +30,7 @@ MAX_REQUEST_MB = 80
 async def lifespan(app: FastAPI):
     chat.init_schema()
     chat_commands.init_schema()
+    chat_telegram_relay.init_schema()
     minigames.init_schema()
     pixels.init_schema()
     pet.init_schema()
@@ -60,9 +62,15 @@ async def lifespan(app: FastAPI):
     notifier.start()
     backup.start()
     strawberry_task = asyncio.create_task(minigames.expiry_loop())
+    relay_task = asyncio.create_task(chat_telegram_relay.worker_loop())
     try:
         yield
     finally:
+        relay_task.cancel()
+        try:
+            await relay_task
+        except asyncio.CancelledError:
+            pass
         strawberry_task.cancel()
         try:
             await strawberry_task
@@ -831,3 +839,4 @@ else:
     @app.get("/")
     async def root():
         return {"service": "LearnQuest API", "docs": "/api/docs", "health": "/api/health"}
+# LQ_TELEGRAM_RELAY_LIFESPAN_20261011
