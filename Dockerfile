@@ -1,4 +1,5 @@
-# Контейнер бэкенда LearnQuest. Данные (SQLite, загруженные файлы) — в томе /data.
+# Контейнер бэкенда LearnQuest. Данные (SQLite, загруженные файлы) — в каталоге /data: смонтируй туда том (compose: lq-data, Railway: Volume).
+# Инструкции VOLUME здесь нет намеренно: Railway отклоняет Dockerfile с ней.
 FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \
@@ -14,7 +15,6 @@ RUN pip install -r requirements.txt
 COPY server ./server
 COPY run.py .
 
-VOLUME ["/data"]
 EXPOSE 80
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s \
