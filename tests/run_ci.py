@@ -31,6 +31,7 @@ CHECKS = [
     ("tests/test_account.py", True, False),
     ("tests/test_password_reset.py", True, False),
     ("tests/test_slots.py", True, False),
+    ("tests/test_slots_meme.py", True, False),
     ("tests/test_pixels.py", True, False),
     ("tests/test_pet.py", True, False),
     ("tests/test_farm.py", True, False),
