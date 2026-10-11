@@ -8,6 +8,7 @@ import traceback
 import httpx
 
 from . import config, engine, generator, gamification as gm, service, svgtools
+from . import chat_telegram_relay as relay
 from .db import db, jl
 
 TRANSPORT = None  # httpx-транспорт для тестов
@@ -54,6 +55,10 @@ async def api(method: str, **params):
 
 
 async def send(chat_id: int, text: str, buttons: list[list[tuple[str, str]]] | None = None, **kw):
+    # All group replies and the SQLite relay use the SAME durable rate limiter.
+    # Direct/private-chat bot features are unchanged.
+    if isinstance(chat_id, int) and chat_id < 0:
+        return await relay.send_group(chat_id, text, buttons, **kw)
     params = {"chat_id": chat_id, "text": text[:4000], "parse_mode": "HTML", "disable_web_page_preview": True}
     if buttons:
         params["reply_markup"] = {"inline_keyboard": [[{"text": t, "callback_data": d} for t, d in row] for row in buttons]}
@@ -306,10 +311,69 @@ async def show_stats(chat_id: int, user: dict):
     await send(chat_id, "\n".join(lines), [[("📚 Курсы", "menu:courses")]])
 
 
+# --------------------------------------------------------------------- привязка группы к односторонней ленте чата
+async def on_relay_group_message(msg: dict) -> None:
+    chat_info = msg.get("chat") or {}
+    if chat_info.get("type") not in ("group", "supergroup"):
+        return
+    text = (msg.get("text") or "").strip()
+    # The bot ignores ALL other group messages; there is no reverse chat bridge.
+    command = text.split(maxsplit=1)[0] if text else ""
+    if "@" in command and command.rsplit("@", 1)[1].lower() != bot_username().lower():
+        return
+    name = command.split("@", 1)[0].lower()
+    if name not in ("/relay_here", "/relay_off", "/relay_status"):
+        return
+    group_id = chat_info["id"]
+    sender_id = (msg.get("from") or {}).get("id")
+    if not relay.linked_admin(sender_id) or not await relay.telegram_group_admin(group_id, sender_id):
+        await send(group_id, "⚠️ Привязать группу может только администратор LearnQuest, "
+                             "привязавший аккаунт к боту и имеющий права администратора этой группы.")
+        return
+    if name == "/relay_here":
+        relay.configure_group(group_id)
+        await send(group_id, "✅ Эта группа подключена к событиям LearnQuest. "
+                             "Пересылаются только системные сообщения и использования команд. "
+                             "Обычные сообщения пользователей не пересылаются.")
+    elif name == "/relay_off":
+        if relay.target_group() == group_id:
+            relay.configure_group(None)
+            await send(group_id, "🔕 Пересылка событий LearnQuest в эту группу отключена.")
+        else:
+            await send(group_id, "Эта группа не подключена к ленте событий.")
+    else:
+        active = relay.target_group() == group_id
+        await send(group_id, "📡 Пересылка LearnQuest: " + ("включена для этой группы" if active else "не настроена для этой группы"))
+
+
+async def on_relay_membership(update: dict) -> None:
+    chat_info = update.get("chat") or {}
+    if chat_info.get("type") not in ("group", "supergroup"):
+        return
+    group_id = chat_info["id"]
+    old = (update.get("old_chat_member") or {}).get("status")
+    new = (update.get("new_chat_member") or {}).get("status")
+    active = ("member", "administrator", "creator")
+    if new in active and old not in active:
+        initiator = (update.get("from") or {}).get("id")
+        if await relay.register_if_authorized(group_id, initiator):
+            await send(group_id, "✅ Группа автоматически подключена к уведомлениям LearnQuest. "
+                                 "Отключить: /relay_off")
+        else:
+            await send(group_id, "📢 Бот LearnQuest добавлен. Чтобы получать системные события и команды, "
+                                 "администратор сайта, привязавший личный Telegram, должен написать /relay_here. "
+                                 "Он также должен быть администратором этой группы.")
+    elif old in active and new not in active and relay.target_group() == group_id:
+        relay.configure_group(None)
+
+
 # --------------------------------------------------------------------- обработчики
 async def on_message(msg: dict):
     chat_id = msg["chat"]["id"]
     text = (msg.get("text") or "").strip()
+    if msg.get("chat", {}).get("type") in ("group", "supergroup"):
+        await on_relay_group_message(msg)
+        return
     user = user_by_chat(chat_id)
 
     if text.startswith("/start"):
@@ -496,15 +560,23 @@ async def _handle(update: dict):
             chat = update["message"]["chat"]["id"]
         elif "callback_query" in update:
             chat = update["callback_query"]["message"]["chat"]["id"]
+        elif "my_chat_member" in update:
+            chat = update["my_chat_member"]["chat"]["id"]
         lk = _chat_locks.setdefault(chat, asyncio.Lock())
         async with lk:
             if "message" in update:
                 await on_message(update["message"])
             elif "callback_query" in update:
                 await on_callback(update["callback_query"])
-    except Exception:
+            elif "my_chat_member" in update:
+                await on_relay_membership(update["my_chat_member"])
+    except Exception as exc:
+        # The group was already rate-limited. Replying again would extend the ban.
+        if chat and chat < 0 and (isinstance(exc, relay.GroupSendCooldown)
+                                  or relay._retry_after(exc) > 0):
+            return
         traceback.print_exc()
-        if chat:
+        if chat and chat > 0:
             try:
                 await send(chat, "Что-то пошло не так. Попробуй ещё раз или открой /menu.")
             except Exception:
@@ -531,7 +603,7 @@ async def _run():
                 {"command": "help", "description": "Помощь"}])
             current = tk
             while token() == current:
-                ups = await api("getUpdates", offset=offset, timeout=25, allowed_updates=["message", "callback_query"])
+                ups = await api("getUpdates", offset=offset, timeout=25, allowed_updates=["message", "callback_query", "my_chat_member"])
                 for up in ups:
                     offset = up["update_id"] + 1
                     t = asyncio.create_task(_handle(up))

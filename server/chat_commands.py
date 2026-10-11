@@ -221,7 +221,7 @@ def use(user_id: int, name: str, request_id: str):
              (amount, user_id))
         # Видимое для всех сообщение о срабатывании команды; не скрытая накрутка.
         stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        text = f"🎁 {name} → +{amount} жетонов"
+        text = f"{name} · +{amount} 🪙 — {cmd['description']}"
         mid = db.x("""INSERT INTO chat_messages(user_id,request_id,text,created_ts,created_at)
                        VALUES(?,?,?,?,?)""", (user_id, "cmd:" + request_id, text, now, stamp))
         db.x("UPDATE chat_messages SET system_kind='command' WHERE id=?", (mid,))

@@ -24,6 +24,8 @@ CHECKS = [
     ("tests/test_llm_chain.py", False, False),
     ("tests/test_tgbot.py", False, False),
     ("tests/test_admin_env.py", False, False),
+    ("tests/test_chat_telegram_relay.py", False, False),
+    ("tests/test_flood_guard.py", False, False),
     ("tests/e2e_flow.py", True, False),
     ("tests/test_mastery.py", True, False),
     ("tests/test_social.py", True, False),
