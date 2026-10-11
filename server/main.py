@@ -17,7 +17,7 @@ from . import gamification as gm
 from . import chat
 from . import chat_commands
 from . import chat_telegram_relay
-from . import arena, farm, lab, minigames, pet, pixels
+from . import arena, farm, lab, minigames, pet, pixels, planner
 from . import slots_meme
 from .db import db, jd, jl
 from .llm import llm
@@ -38,6 +38,7 @@ async def lifespan(app: FastAPI):
     farm.init_schema()
     lab.init_schema()
     slots_meme.init_schema()
+    planner.init_schema()
     generator.set_loop(asyncio.get_running_loop())
     catalog.system_user_id()
     # восстановление после перезапуска
@@ -91,6 +92,7 @@ app.include_router(arena.router)
 app.include_router(farm.router)
 app.include_router(lab.router)
 app.include_router(slots_meme.router)
+app.include_router(planner.router)
 
 # ---------- CORS: фронт на GitHub Pages ходит на этот бэкенд с другого домена; авторизация — Bearer-токеном, куки не нужны ----------
 _local = [f"http://127.0.0.1:{config.PORT}", f"http://localhost:{config.PORT}"]
