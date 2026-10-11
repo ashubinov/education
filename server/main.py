@@ -17,7 +17,7 @@ from . import gamification as gm
 from . import chat
 from . import chat_commands
 from . import chat_telegram_relay
-from . import arena, farm, lab, minigames, pet, pixels, planner
+from . import arena, arena_pvp, farm, lab, minigames, pet, pixels, planner
 from . import slots_meme
 from .db import db, jd, jl
 from .llm import llm
@@ -35,11 +35,13 @@ async def lifespan(app: FastAPI):
     pixels.init_schema()
     pet.init_schema()
     arena.init_schema()
+    arena_pvp.init_schema()
     farm.init_schema()
     lab.init_schema()
     slots_meme.init_schema()
     planner.init_schema()
     generator.set_loop(asyncio.get_running_loop())
+    arena_pvp.set_loop(asyncio.get_running_loop())
     catalog.system_user_id()
     # восстановление после перезапуска
     db.x("UPDATE lessons SET status='pending' WHERE status='generating'")
@@ -64,12 +66,18 @@ async def lifespan(app: FastAPI):
     backup.start()
     strawberry_task = asyncio.create_task(minigames.expiry_loop())
     relay_task = asyncio.create_task(chat_telegram_relay.worker_loop())
+    pvp_task = asyncio.create_task(arena_pvp.expiry_loop())
     try:
         yield
     finally:
         relay_task.cancel()
         try:
             await relay_task
+        except asyncio.CancelledError:
+            pass
+        pvp_task.cancel()
+        try:
+            await pvp_task
         except asyncio.CancelledError:
             pass
         strawberry_task.cancel()
@@ -89,6 +97,7 @@ app.include_router(minigames.router)
 app.include_router(pixels.router)
 app.include_router(pet.router)
 app.include_router(arena.router)
+app.include_router(arena_pvp.router)
 app.include_router(farm.router)
 app.include_router(lab.router)
 app.include_router(slots_meme.router)
