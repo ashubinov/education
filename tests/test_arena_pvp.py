@@ -126,6 +126,8 @@ def main():
                 m = state(client, a)['active']
                 assert m['pot'] == 160 and m['round_no'] == 1
                 assert m['status'] == 'reveal' and m['combat']['hp_me'] == pvp.BASE_HP
+                assert pvp.COMBAT_SECONDS == 15
+                assert 13.0 < m['deadline'] - time.time() <= 15.0, 'fight should last 15s by server clock'
                 assert m['combat']['hp_other'] == pvp.BASE_HP
                 # Ticker must NEVER hit either pet without a player's action.
                 initial_combat = state(client,a)['active']['combat']
