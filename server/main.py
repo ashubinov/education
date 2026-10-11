@@ -839,4 +839,3 @@ else:
     @app.get("/")
     async def root():
         return {"service": "LearnQuest API", "docs": "/api/docs", "health": "/api/health"}
-# LQ_TELEGRAM_RELAY_LIFESPAN_20261011

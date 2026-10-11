@@ -42,7 +42,7 @@ server=types.ModuleType('server');server.__path__=[]
 server_db=types.ModuleType('server.db');server_db.db=db
 sys.modules['server']=server
 sys.modules['server.db']=server_db
-spec=importlib.util.spec_from_file_location('server.chat_telegram_relay',ROOT/'payload/chat_telegram_relay.py')
+spec=importlib.util.spec_from_file_location('server.chat_telegram_relay',ROOT/'server/chat_telegram_relay.py')
 relay=importlib.util.module_from_spec(spec);sys.modules[spec.name]=relay;spec.loader.exec_module(relay)
 sys.modules['server.chat_telegram_relay']=relay
 

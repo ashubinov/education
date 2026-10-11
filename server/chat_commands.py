@@ -266,5 +266,3 @@ async def update_command(command_id: int, request: Request, body: CommandCreateI
 async def delete_command(command_id: int, request: Request):
     _admin(request)
     return await run_in_threadpool(delete, command_id)
-
-# CHAT_COMMAND_AUTHOR_20261011_V4

@@ -21,6 +21,7 @@ from .db import db
 router = APIRouter(prefix="/api/minigames/strawberry", tags=["Мини-игры · Клубничный вор"])
 MIN_STEAL = 1
 MAX_STEAL_PERCENT = 30
+CATCH_PENALTY_PERCENT = 10  # штраф вору, если его поймали: идёт жертве; берётся из его свободных жетонов (сколько есть)
 STEAL_COOLDOWN = 60  # защита от спама: не более одной новой кражи в минуту
 ANSWER_SECONDS = 24 * 3600
 MAX_BALANCE = 9_000_000_000_000_000
@@ -155,16 +156,29 @@ def _announcement_name(user: dict | None, fallback: str) -> str:
     return ((user.get("display_name") or "").strip() or user["username"]).upper()
 
 
+def _catch_penalty(row: dict) -> int:
+    """Штраф пойманному вору (CATCH_PENALTY_PERCENT от украденного, минимум 1), но не больше его свободного баланса."""
+    want = max(1, row["amount"] * CATCH_PENALTY_PERCENT // 100)
+    have = slots.ensure_account(row["thief_id"])["balance"]
+    return max(0, min(want, have))
+
+
 def _finish(row: dict, outcome: str, now: int, guessed_id=None, guess_req=None):
     """Called inside db.tx only. Escrow is disbursed exactly once."""
     if row["status"] != "pending":
         return
+    penalty = 0
     thief = db.one("SELECT id,username,display_name FROM users WHERE id=?", (row["thief_id"],))
     victim = db.one("SELECT id,username,display_name FROM users WHERE id=?", (row["victim_id"],))
     if outcome == "caught":
         if not victim:
             raise HTTPException(409, "Получатель недоступен")
         _credit(row["victim_id"], row["amount"])
+        if thief:
+            penalty = _catch_penalty(row)
+            if penalty:
+                db.x("UPDATE slot_accounts SET balance=balance-?,updated_at=CURRENT_TIMESTAMP WHERE user_id=?", (penalty, row["thief_id"]))
+                _credit(row["victim_id"], penalty)
         headline = (f"{_announcement_name(thief, row['thief_username'])} СЛОВИЛ КРЕМПАЙ ОТ "
                     f"{_announcement_name(victim, row['victim_username'])}!!!!")
     elif outcome == "escaped":
@@ -181,8 +195,8 @@ def _finish(row: dict, outcome: str, now: int, guessed_id=None, guess_req=None):
         headline = None
     else:
         raise ValueError("Недопустимый исход")
-    db.x("""UPDATE strawberry_thefts SET status=?,guessed_id=?,guess_request_id=?,resolved_ts=?
-        WHERE id=? AND status='pending'""", (outcome,guessed_id,guess_req,now,row["id"]))
+    db.x("""UPDATE strawberry_thefts SET status=?,guessed_id=?,guess_request_id=?,resolved_ts=?,fee=?
+        WHERE id=? AND status='pending'""", (outcome,guessed_id,guess_req,now,penalty,row["id"]))
     if headline:
         chat.post_system(headline, f"strawberry:{row['id']}", kind="strawberry")
 
@@ -237,9 +251,9 @@ def overview(uid: int) -> dict:
     return {"friends":friends,"pending":_pending(uid),"balance":acc["balance"],
             "frozen":held,"collateral":0,"has_active_theft":bool(held),
             "cooldown_remaining":_cooldown(uid,now),"cooldown_seconds":STEAL_COOLDOWN,
-            "min_steal":MIN_STEAL,"max_steal_percent":MAX_STEAL_PERCENT,"answer_seconds":ANSWER_SECONDS,
+            "min_steal":MIN_STEAL,"max_steal_percent":MAX_STEAL_PERCENT,"catch_penalty_percent":CATCH_PENALTY_PERCENT,"answer_seconds":ANSWER_SECONDS,
             "rules":"Украденные жетоны заморожены до ответа или истечения 24 часов. "
-                    "Если жертва угадает — ей вернут украденную сумму без компенсации. "
+                    f"Если жертва угадает — ей вернут украденное, а вор заплатит штраф {CATCH_PENALTY_PERCENT}% (не больше своего баланса). "
                     "Если не угадает или не ответит за 24 часа — замороженные жетоны достанутся вору."}
 
 
@@ -296,7 +310,7 @@ def steal(thief_id: int, victim_id: int, amount: int, request_id: str) -> dict:
 
 def _view(row: dict, replayed: bool):
     return {"theft_id":row["id"],"caught":row["status"]=="caught",
-            "amount":row["amount"],"compensation":0,
+            "amount":row["amount"],"compensation":row["fee"] if row["status"]=="caught" else 0,
             "status":row["status"],"replayed":replayed}
 
 
@@ -360,7 +374,3 @@ async def post_steal(request: Request, body: TheftIn):
 @router.post("/guess")
 async def post_guess(request: Request, body: GuessIn):
     return await run_in_threadpool(guess,_user(request)["id"],body.theft_id,body.suspect_id,body.request_id)
-
-# STRAWBERRY_RULES_20261011_V4
-# STRAWBERRY_CAUGHT_NAMES_20261011_V5
-# LQ_STRAWBERRY_START_NOTICE_20261011

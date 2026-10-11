@@ -645,5 +645,3 @@ async def restart():
         await asyncio.sleep(0.3)
         if _username or _error:
             break
-# LQ_TELEGRAM_GROUP_BINDING_20261011
-# LQ_TELEGRAM_GROUP_SEND_THROTTLE_20261011
