@@ -96,61 +96,16 @@ assert a.post("/api/pet/arena/fight", json={"npc": "npc_boris"}).status_code == 
 print("OK: бот — ставка, голод, баланс, суточный лимит")
 
 # ----------------------------------------------------------------------------- друзья
-b.post("/api/pet/adopt", json={"species": "rooster", "name": "Борода"})
-c.post("/api/pet/adopt", json={"species": "ram", "name": "Баран"})
-assert "Друг не найден" in err(a.post("/api/pet/arena/fight", json={"opponent_id": ub["id"]}), 404)  # ещё не друзья
-for fr, fu in ((b, ub), (c, uc)):
-    assert a.post("/api/friends/request", json={"username": fu["username"]}).status_code == 200
-    fr.post(f"/api/friends/{ua['id']}/accept")
-s = a.get("/api/pet/arena").json()
-users = {o["id"]: o for o in s["opponents"] if o["kind"] == "user"}
-assert set(users) == {ub["id"]} and users[ub["id"]]["pet"]["name"] == "Борода" and users[ub["id"]]["pair_left"] == A.PAIR_PER_DAY and "balance" not in users[ub["id"]]
-assert "нет петуха" in err(a.post("/api/pet/arena/fight", json={"opponent_id": uc["id"]}), 404)
-assert "самим собой" in err(a.post("/api/pet/arena/fight", json={"opponent_id": ua["id"]}))
-print("OK: друзья — в списке только друзья с петухом")
-
-# ----------------------------------------------------------------------------- ставка уходит другу при поражении, при победе добавляется из фонда
-sql("UPDATE pets SET xp=900 WHERE user_id=?", (ub["id"],))   # сильный защитник против слабого нападающего
-sql("UPDATE pets SET xp=0 WHERE user_id=?", (ua["id"],))
-lost = False
-for _ in range(30):
-    reset_day(ua["id"])
-    sql("UPDATE pets SET fullness=100, fed_at=? WHERE user_id IN (?,?)", (time.time(), ua["id"], ub["id"]))
-    sql("UPDATE slot_accounts SET balance=1000 WHERE user_id IN (?,?)", (ua["id"], ub["id"]))
-    r = a.post("/api/pet/arena/fight", json={"opponent_id": ub["id"], "bet": 50}).json()
-    if not r["result"]["won"]:
-        assert bal(a) == 950 and bal(b) == 1050, (bal(a), bal(b))
-        rb = b.get("/api/pet/arena").json()
-        assert rb["recent"][0]["role"] == "defender" and rb["recent"][0]["won"] is True and rb["recent"][0]["delta"] == 50 and rb["record"]["wins"] >= 1
-        lost = True
-        break
-assert lost, "слабый петух должен проигрывать сильному"
-sql("UPDATE pets SET xp=900 WHERE user_id=?", (ua["id"],))
-sql("UPDATE pets SET xp=0 WHERE user_id=?", (ub["id"],))
-won = False
-for _ in range(30):
-    reset_day(ua["id"])
-    sql("UPDATE pets SET fullness=100, fed_at=? WHERE user_id IN (?,?)", (time.time(), ua["id"], ub["id"]))
-    sql("UPDATE slot_accounts SET balance=1000 WHERE user_id IN (?,?)", (ua["id"], ub["id"]))
-    r = a.post("/api/pet/arena/fight", json={"opponent_id": ub["id"], "bet": 50}).json()
-    if r["result"]["won"]:
-        assert bal(a) == 1050 and bal(b) == 1000, (bal(a), bal(b))
-        won = True
-        break
-assert won
-# не больше двух боёв в сутки с одним другом
-reset_day(ua["id"])
-for _ in range(A.PAIR_PER_DAY):
-    sql("UPDATE pets SET fullness=100, fed_at=? WHERE user_id=?", (time.time(), ua["id"]))
-    assert a.post("/api/pet/arena/fight", json={"opponent_id": ub["id"]}).status_code == 200
-sql("UPDATE pets SET fullness=100, fed_at=? WHERE user_id=?", (time.time(), ua["id"]))
-assert "завтра" in err(a.post("/api/pet/arena/fight", json={"opponent_id": ub["id"]}))
-assert a.post("/api/pet/arena/fight", json={"npc": "npc_novice"}).status_code == 200  # с ботом можно
-print("OK: ставка — перевод другу, призовой фонд, лимит на пару")
-assert a.post("/api/pet/arena/fight", json={"opponent_id": 10**30}).status_code == 422 and a.post("/api/pet/arena/fight", json={"opponent_id": 0}).status_code == 422, "огромные id не должны ронять сервер"
+# Legacy offline player fights are disabled. Bot-only sparring is covered above.
+b.post('/api/pet/adopt', json={'species': 'rooster', 'name': 'Борода'})
+assert a.post('/api/friends/request', json={'username': ub['username']}).status_code == 200
+assert b.post(f"/api/friends/{ua['id']}/accept").status_code == 200
+before_a, before_b = bal(a), bal(b)
+assert 'Live PvP' in err(a.post('/api/pet/arena/fight', json={'opponent_id': ub['id'], 'bet': 10}))
+assert bal(a) == before_a and bal(b) == before_b
+assert sql('SELECT COUNT(*) FROM pet_fights WHERE attacker_id=? AND defender_id=?', (ua['id'], ub['id']))[0][0] == 0
+print('OK: офлайн-PvP запрещено, жетоны не меняются')
 
 # ----------------------------------------------------------------------------- удаление
-assert sql("SELECT COUNT(*) FROM pet_fights WHERE attacker_id=? OR defender_id=?", (ub["id"], ub["id"]))[0][0] > 0
 assert adm.delete(f"/api/admin/users/{ub['id']}").status_code == 200
-assert sql("SELECT COUNT(*) FROM pet_fights WHERE attacker_id=? OR defender_id=?", (ub["id"], ub["id"]))[0][0] == 0
-print("ALL OK")
+print('ALL OK')

@@ -176,7 +176,9 @@ def rename(user_id: int, name: str) -> dict:
 
 def release(user_id: int) -> dict:
     """Отпустить питомца на волю (можно завести нового). Запас еды остаётся."""
+    from . import arena_pvp
     with db.tx():
+        arena_pvp.ensure_no_active(user_id)
         if not _get(user_id):
             raise HTTPException(400, "У тебя нет питомца")
         db.x("DELETE FROM pets WHERE user_id=?", (user_id,))
