@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import string
 import secrets
 import threading
 import time
@@ -28,7 +29,11 @@ MIN_BET, MAX_BET, STEP = 10, 200, 10
 MAX_COMMITTED = 2000  # per player, over the entire match
 MAX_RAISES = 3  # per betting phase
 MIN_FULLNESS = 20
-INVITE_SECONDS, TURN_SECONDS, REVEAL_SECONDS = 120, 35, 4
+INVITE_SECONDS, TURN_SECONDS, COMBAT_SECONDS = 120, 35, 20
+BASE_HP = 120.0
+QTE_SECONDS = 4.2
+ATTACK_INTERVAL = 0.32
+GUARD_INTERVAL = 1.5
 DAILY_LIMIT, PAIR_LIMIT = 5, 2
 MAX_BALANCE = 9_000_000_000_000_000
 ACTIVE = ("invited", "betting", "reveal")
@@ -53,6 +58,15 @@ class MatchIn(Strict):
 class ActionIn(MatchIn):
     move: str = Field(pattern=r"^(check|call|raise|fold)$")
     amount: int = Field(default=0, ge=0, le=MAX_BET, strict=True)
+
+
+class CombatIn(MatchIn):
+    move: str = Field(pattern=r"^(attack|guard)$")
+
+
+class QteIn(MatchIn):
+    nonce: int = Field(ge=1, strict=True)
+    sequence: str = Field(pattern=r"^[A-Z]{1,3}$")
 
 
 def init_schema():
@@ -89,7 +103,29 @@ def init_schema():
           delta INTEGER NOT NULL, kind TEXT NOT NULL, created_at REAL NOT NULL
         );
         CREATE INDEX IF NOT EXISTS ix_pvp_ledger_match ON pvp_ledger(match_id,id);
+        CREATE TABLE IF NOT EXISTS pvp_combat(
+          match_id INTEGER PRIMARY KEY,
+          hp_a REAL NOT NULL DEFAULT 120, hp_b REAL NOT NULL DEFAULT 120,
+          energy_a REAL NOT NULL DEFAULT 100, energy_b REAL NOT NULL DEFAULT 100,
+          attack_a REAL NOT NULL DEFAULT 0, attack_b REAL NOT NULL DEFAULT 0,
+          guard_a REAL NOT NULL DEFAULT 0, guard_b REAL NOT NULL DEFAULT 0,
+          energy_at REAL NOT NULL DEFAULT 0,
+          tick_at REAL NOT NULL DEFAULT 0,
+          events_json TEXT NOT NULL DEFAULT '[]', event_seq INTEGER NOT NULL DEFAULT 0,
+          phase_until REAL NOT NULL DEFAULT 0,
+          qte_nonce INTEGER NOT NULL DEFAULT 0,
+          qte_a TEXT NOT NULL DEFAULT '', qte_b TEXT NOT NULL DEFAULT '',
+          qte_done_a INTEGER NOT NULL DEFAULT 0, qte_done_b INTEGER NOT NULL DEFAULT 0,
+          qte_until REAL NOT NULL DEFAULT 0, next_qte REAL NOT NULL DEFAULT 0,
+          qte_count INTEGER NOT NULL DEFAULT 0
+        );
         """)
+        # Upgrade from the previous PvP release without losing in-progress bets.
+        # The old release has no pvp_combat row for accepted battles.
+        ts = time.time()
+        db.conn.execute("""INSERT OR IGNORE INTO pvp_combat(match_id,energy_at,tick_at,phase_until,next_qte)
+            SELECT id,?,?,CASE WHEN status='reveal' THEN deadline ELSE 0 END,?
+            FROM pvp_matches WHERE status IN ('betting','reveal')""", (ts, ts, ts + 4.0))
         db.conn.commit()
 
 
@@ -302,30 +338,123 @@ def _cancel(m: dict, reason: str, now: float):
     db.x("UPDATE pvp_matches SET status='cancelled',result_reason=?,deadline=?,ended_at=? WHERE id=?", (reason, now, now, m["id"]))
 
 
+# -------------------------- interactive combat -------------------------------
+def _combat(mid: int):
+    return db.one("SELECT * FROM pvp_combat WHERE match_id=?", (mid,))
+
+
+def _event(c: dict, kind: str, now: float, **details):
+    events = json.loads(c["events_json"])
+    seq = c["event_seq"] + 1
+    events.append({"seq": seq, "type": kind, "at": round(now, 3), **details})
+    db.x("UPDATE pvp_combat SET events_json=?,event_seq=? WHERE match_id=?",
+         (json.dumps(events[-45:], ensure_ascii=False), seq, c["match_id"]))
+    return _combat(c["match_id"])
+
+
+def _damage(m: dict, attacker: int, kind: str, now: float, multiplier: float = 1.0):
+    c = _combat(m["id"])
+    enemy = _other(m, attacker)
+    is_a = attacker == m["challenger_id"]
+    target_key = "hp_b" if is_a else "hp_a"
+    their_guard = c["guard_b" if is_a else "guard_a"]
+    strength = m["power_a"] if is_a else m["power_b"]
+    opposing = m["power_b"] if is_a else m["power_a"]
+    # Equal inputs: strength dominates, small bounded randomness is retained.
+    ratio = max(.22, min(3.0, strength / max(.01, opposing))) ** .72
+    # No passive attacks: damage is possible only from explicit attack or solved QTE.
+    if kind not in ("attack", "critical"):
+        raise ValueError("Нельзя наносить пассивный урон")
+    base = 3.5 if kind == "attack" else 14.0
+    damage = round(base * ratio * RNG.uniform(.86, 1.14) * multiplier * (.38 if their_guard > now else 1.0), 1)
+    hp = max(0.0, round(c[target_key] - damage, 1))
+    db.x(f"UPDATE pvp_combat SET {target_key}=? WHERE match_id=?", (hp, m["id"]))
+    c = _event(_combat(m["id"]), "hit", now, source=attacker, target=enemy,
+               damage=damage, attack=kind, hp=hp, guarded=their_guard > now)
+    if hp <= 0:
+        _event(c, "knockout", now, winner_id=attacker)
+        _finish(m, attacker, "knockout", now)
+        return True
+    return False
+
+
+def _start_combat(m: dict, now: float):
+    c = _combat(m["id"])
+    if not c:
+        raise RuntimeError("Combat state missing")
+    until = now + COMBAT_SECONDS
+    db.x("""UPDATE pvp_combat SET energy_a=100,energy_b=100,energy_at=?,tick_at=?,
+        attack_a=0,attack_b=0,guard_a=0,guard_b=0,phase_until=?,
+        qte_a='',qte_b='',qte_until=0,next_qte=?,qte_count=0,
+        qte_done_a=0,qte_done_b=0 WHERE match_id=?""",
+         (now, now, until, now + RNG.uniform(3.5, 5.5), m["id"]))
+    db.x("UPDATE pvp_matches SET status='reveal',turn_user=NULL,deadline=? WHERE id=?", (until, m["id"]))
+    _event(_combat(m["id"]), "phase", now, round=m["round_no"])
+
+
 def _round(m: dict, now: float):
-    p = win_probability(m["power_a"], m["power_b"])
-    winner = m["challenger_id"] if RNG.random() < p else m["defender_id"]
-    events = json.loads(m["rounds_json"])
-    events.append({"round": m["round_no"], "winner_id": winner})
-    wa = m["wins_a"] + int(winner == m["challenger_id"])
-    wb = m["wins_b"] + int(winner == m["defender_id"])
-    db.x("UPDATE pvp_matches SET rounds_json=?,wins_a=?,wins_b=?,turn_user=NULL WHERE id=?",
-         (json.dumps(events), wa, wb, m["id"]))
-    changed = _row(m["id"])
-    if wa == 2 or wb == 2:
-        _finish(changed, winner, "battle", now)
-    else:
-        db.x("UPDATE pvp_matches SET status='reveal',deadline=? WHERE id=?", (now + REVEAL_SECONDS, m["id"]))
+    # Poker betting is complete. Open an interactive combat phase instead of
+    # rolling an immediate best-of-three winner.
+    _start_combat(m, now)
+
+
+def _regen(c: dict, now: float):
+    dt = max(0.0, min(15.0, now - c["energy_at"]))
+    if dt < .01:
+        return c
+    a, b = min(100., c["energy_a"] + 12 * dt), min(100., c["energy_b"] + 12 * dt)
+    db.x("UPDATE pvp_combat SET energy_a=?,energy_b=?,energy_at=? WHERE match_id=?",
+         (a, b, now, c["match_id"]))
+    return _combat(c["match_id"])
+
+
+def _qte_start(c: dict, now: float):
+    n = c["qte_nonce"] + 1
+    # Both players get a separate, simultaneous code. Never depend on frontend RNG.
+    def combo():
+        return ''.join(RNG.choice(string.ascii_uppercase) for _ in range(RNG.randint(1, 3)))
+    da, db_code = combo(), combo()
+    until = min(c["phase_until"] - .5, now + QTE_SECONDS)
+    db.x("""UPDATE pvp_combat SET qte_nonce=?,qte_a=?,qte_b=?,qte_done_a=0,qte_done_b=0,
+       qte_until=?,next_qte=?,qte_count=qte_count+1 WHERE match_id=?""",
+         (n, da, db_code, until, now + RNG.uniform(6.0, 7.5), c["match_id"]))
+    return _event(_combat(c["match_id"]), "qte", now, nonce=n, until=until)
+
+
+def _combat_tick(m: dict, now: float):
+    """Advance combat in small intervals. Persist every applied hit; restarts resume.
+
+    Only one process/worker is supported, but db.tx serializes HTTP and ticker.
+    """
+    c = _combat(m["id"])
+    if not c:
+        raise RuntimeError("Missing combat state")
+    stop = min(now, c["phase_until"])
+    # Deliberately do NOT damage either pet here. A clock tick only schedules
+    # QTE prompts and the next betting phase; no unattended/passive attacks.
+    # Issue up to two surprise QTEs each combat phase.
+    if (c["qte_count"] < 2 and stop >= c["next_qte"] and
+            (not c["qte_until"] or stop >= c["qte_until"]) and
+            stop + 2.0 < c["phase_until"]):
+        _qte_start(c, stop)
+    if now >= c["phase_until"]:
+        c = _combat(m["id"])
+        rounds = json.loads(m["rounds_json"])
+        rounds.append({"round": m["round_no"], "hp_a": c["hp_a"], "hp_b": c["hp_b"]})
+        next_round = m["round_no"] + 1
+        starter = m["defender_id"] if next_round % 2 == 0 else m["challenger_id"]
+        db.x("""UPDATE pvp_matches SET status='betting',rounds_json=?,round_no=?,
+          street_a=0,street_b=0,checks=0,raises=0,turn_user=?,deadline=? WHERE id=?""",
+             (json.dumps(rounds), next_round, starter, now + TURN_SECONDS, m["id"]))
+        _event(c, "pause", now, round=m["round_no"])
+    return False
 
 
 def _process_timeout(m: dict, now: float):
     if m["status"] == "invited":
         _cancel(m, "expired", now)
     elif m["status"] == "reveal":
-        next_round = m["round_no"] + 1
-        starter = m["defender_id"] if next_round == 2 else m["challenger_id"]
-        db.x("""UPDATE pvp_matches SET status='betting',round_no=?,street_a=0,street_b=0,
-          checks=0,raises=0,turn_user=?,deadline=? WHERE id=?""", (next_round, starter, now + TURN_SECONDS, m["id"]))
+        _combat_tick(m, now)
     elif m["status"] == "betting":
         uid = m["turn_user"]
         a, b = (m["street_a"], m["street_b"]) if uid == m["challenger_id"] else (m["street_b"], m["street_a"])
@@ -340,11 +469,26 @@ def _process_timeout(m: dict, now: float):
                      (checks, _other(m, uid), now + TURN_SECONDS, m["id"]))
 
 
+def combat_step():
+    affected = set()
+    now = time.time()
+    with db.tx():
+        for m in db.q("SELECT * FROM pvp_matches WHERE status='reveal' ORDER BY id LIMIT 100"):
+            before = _combat(m["id"])
+            if before:
+                _combat_tick(m, now)
+                after = _combat(m["id"])
+                if after and (after["event_seq"] != before["event_seq"] or
+                              _row(m["id"])["status"] != 'reveal'):
+                    affected.update((m["challenger_id"], m["defender_id"]))
+    if affected:
+        notify(*affected)
+
 def expire_due():
     affected = set()
     now = time.time()
     with db.tx():
-        due = db.q("""SELECT * FROM pvp_matches WHERE status IN ('invited','betting','reveal')
+        due = db.q("""SELECT * FROM pvp_matches WHERE status IN ('invited','betting')
                        AND deadline<=? ORDER BY id LIMIT 100""", (now,))
         for m in due:
             _process_timeout(m, now)
@@ -358,9 +502,10 @@ async def expiry_loop():
     while True:
         try:
             await run_in_threadpool(expire_due)
+            await run_in_threadpool(combat_step)
         except Exception as ex:
             print("[pvp expiry]", repr(ex))
-        await asyncio.sleep(2)
+        await asyncio.sleep(.5)
 
 
 # -------------------------- transitions -------------------------------------
@@ -441,6 +586,7 @@ def respond(uid: int, mid: int, rid: str, move: str):
               (m["initial_bet"], m["initial_bet"], _power(a, now), _power(b, now),
                json.dumps(pet._view(a, now), ensure_ascii=False), json.dumps(pet._view(b, now), ensure_ascii=False),
                m["challenger_id"], now + TURN_SECONDS, mid))
+            db.x("INSERT OR IGNORE INTO pvp_combat(match_id,energy_at,tick_at) VALUES(?,?,?)", (mid, now, now))
         _record_request(uid, rid, mid, move)
     notify(m["challenger_id"], m["defender_id"])
     return get_state(uid)
@@ -508,7 +654,81 @@ def action(uid: int, mid: int, rid: str, move: str, amount: int):
     return get_state(uid)
 
 
+@idempotent
+def combat_action(uid: int, mid: int, rid: str, move: str):
+    expire_due()
+    now = time.time()
+    with db.tx():
+        if _request(uid, rid, mid, "combat:" + move):
+            raise _Replay()
+        m = _row(mid)
+        if not m or not _mine(m, uid):
+            raise HTTPException(404, "Бой не найден")
+        if m["status"] != "reveal" or m["deadline"] <= now:
+            raise HTTPException(409, "Сейчас нельзя наносить удары")
+        c = _regen(_combat(mid), now)
+        own = uid == m["challenger_id"]
+        energy_key = "energy_a" if own else "energy_b"
+        last_key = "attack_a" if own else "attack_b"
+        guard_key = "guard_a" if own else "guard_b"
+        if move == "attack":
+            if now - c[last_key] < ATTACK_INTERVAL or c[energy_key] < 12:
+                raise HTTPException(429, "Атака восстанавливается или не хватает энергии")
+            db.x(f"UPDATE pvp_combat SET {energy_key}={energy_key}-12,{last_key}=? WHERE match_id=?", (now, mid))
+            _damage(m, uid, "attack", now)
+        elif move == "guard":
+            if now - c[guard_key] < GUARD_INTERVAL or c[energy_key] < 8:
+                raise HTTPException(429, "Защита восстанавливается или не хватает энергии")
+            db.x(f"UPDATE pvp_combat SET {energy_key}={energy_key}-8,{guard_key}=? WHERE match_id=?", (now + 1.1, mid))
+            _event(_combat(mid), "guard", now, source=uid)
+        _record_request(uid, rid, mid, "combat:" + move)
+    notify(m["challenger_id"], m["defender_id"])
+    return get_state(uid)
+
+
+@idempotent
+def qte_action(uid: int, mid: int, rid: str, nonce: int, sequence: str):
+    expire_due()
+    now = time.time()
+    with db.tx():
+        key = f"qte:{nonce}:{sequence}"
+        if _request(uid, rid, mid, key):
+            raise _Replay()
+        m = _row(mid)
+        if not m or not _mine(m, uid):
+            raise HTTPException(404, "Бой не найден")
+        c = _combat(mid)
+        if m["status"] != 'reveal' or not c or c["qte_nonce"] != nonce or now > c["qte_until"]:
+            raise HTTPException(409, "Комбинация уже недоступна")
+        mine = uid == m["challenger_id"]
+        code = c["qte_a"] if mine else c["qte_b"]
+        done_key = "qte_done_a" if mine else "qte_done_b"
+        if c[done_key]:
+            raise HTTPException(409, "Комбинация уже выполнена")
+        if sequence != code:
+            raise HTTPException(400, "Неверная комбинация")
+        db.x(f"UPDATE pvp_combat SET {done_key}=1 WHERE match_id=?", (mid,))
+        _event(_combat(mid), "critical", now, source=uid, combo=code)
+        _damage(m, uid, "critical", now)
+        _record_request(uid, rid, mid, key)
+    notify(m["challenger_id"], m["defender_id"])
+    return get_state(uid)
+
+
 # -------------------------- read model --------------------------------------
+def _combat_view(m: dict, uid: int):
+    c = _combat(m["id"])
+    if not c:
+        return None
+    own = uid == m["challenger_id"]
+    return {"hp_me": c["hp_a"] if own else c["hp_b"], "hp_other": c["hp_b"] if own else c["hp_a"],
+            "hp_max": BASE_HP, "energy": round(c["energy_a"] if own else c["energy_b"], 1),
+            "events": json.loads(c["events_json"]), "event_seq": c["event_seq"],
+            "qte_nonce": c["qte_nonce"], "qte_code": (c["qte_a"] if own else c["qte_b"]) if m["status"] == "reveal" and c["qte_until"] > time.time() else "",
+            "qte_done": bool(c["qte_done_a"] if own else c["qte_done_b"]),
+            "qte_until": c["qte_until"], "phase_until": c["phase_until"]}
+
+
 def _present(m: dict, uid: int):
     own_a = uid == m["challenger_id"]
     mine = m["challenger_id"] if own_a else m["defender_id"]
@@ -540,6 +760,7 @@ def _present(m: dict, uid: int):
         "wins_me": m["wins_a"] if own_a else m["wins_b"],
         "wins_other": m["wins_b"] if own_a else m["wins_a"],
         "rounds": json.loads(m["rounds_json"]),
+        "combat": _combat_view(m, uid),
         "turn_user": m["turn_user"], "my_turn": m["turn_user"] == uid and m["status"] == "betting",
         "to_call": to_call, "raises_left": MAX_RAISES - m["raises"], "raise_max": raise_max,
         "winner_id": m["winner_id"], "reason": m["result_reason"], "deadline": m["deadline"],
@@ -627,3 +848,13 @@ async def api_cancel(request: Request, body: MatchIn):
 @router.post("/action")
 async def api_action(request: Request, body: ActionIn):
     return await run_in_threadpool(action, _me(request), body.match_id, body.request_id, body.move, body.amount)
+
+
+@router.post("/combat")
+async def api_combat(request: Request, body: CombatIn):
+    return await run_in_threadpool(combat_action, _me(request), body.match_id, body.request_id, body.move)
+
+
+@router.post("/qte")
+async def api_qte(request: Request, body: QteIn):
+    return await run_in_threadpool(qte_action, _me(request), body.match_id, body.request_id, body.nonce, body.sequence)
