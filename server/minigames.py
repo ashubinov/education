@@ -1,7 +1,7 @@
 """Strawberry Thief: transactionally escrowed, private until resolved, timeout = thief wins.
 
-All balances in slot_accounts.balance are spendable. Stolen chips and the 5% thief
-collateral live only in pending strawberry_thefts and therefore cannot be spent.
+All balances in slot_accounts.balance are spendable. The stolen principal
+lives in pending strawberry_thefts until the victim guesses or 24 hours elapse.
 """
 from __future__ import annotations
 
@@ -19,8 +19,8 @@ from . import auth, chat, social, slots
 from .db import db
 
 router = APIRouter(prefix="/api/minigames/strawberry", tags=["Мини-игры · Клубничный вор"])
-MIN_STEAL = 10
-MAX_STEAL = 100
+MIN_STEAL = 1
+MAX_STEAL_PERCENT = 30
 STEAL_COOLDOWN = 60  # защита от спама: не более одной новой кражи в минуту
 ANSWER_SECONDS = 24 * 3600
 MAX_BALANCE = 9_000_000_000_000_000
@@ -32,6 +32,7 @@ class Strict(BaseModel):
 
 class TheftIn(Strict):
     victim_id: int = Field(ge=1)
+    amount: int = Field(ge=1, le=9_000_000_000_000_000, strict=True)
     request_id: str = Field(pattern=r"^[A-Za-z0-9_-]{16,64}$")
 
 
@@ -51,7 +52,7 @@ def init_schema():
             thief_username TEXT NOT NULL,
             victim_username TEXT NOT NULL,
             amount INTEGER NOT NULL CHECK(amount > 0),
-            fee INTEGER NOT NULL CHECK(fee > 0),
+            fee INTEGER NOT NULL DEFAULT 0 CHECK(fee >= 0),
             candidates_json TEXT NOT NULL,
             request_id TEXT NOT NULL,
             created_ts INTEGER NOT NULL,
@@ -72,6 +73,54 @@ def init_schema():
         CREATE INDEX IF NOT EXISTS ix_strawberry_thief_recent
           ON strawberry_thefts(thief_id,created_ts DESC);
         """)
+    _migrate_no_fees()
+
+
+def _migrate_no_fees():
+    """Atomically remove the old required-fee constraint; refund *pending* collateral.
+
+    Historical settled records retain their old fee for auditing, but new and
+    still-pending thefts have zero fee. Safe on re-run and concurrent startups.
+    """
+    with db.tx():
+        ddl = db.val("SELECT sql FROM sqlite_master WHERE type='table' AND name='strawberry_thefts'", default="") or ""
+        if "CHECK(fee > 0)" not in ddl:
+            return
+        db.x("""CREATE TABLE strawberry_thefts_v4 (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            thief_id INTEGER NOT NULL, victim_id INTEGER NOT NULL,
+            thief_username TEXT NOT NULL, victim_username TEXT NOT NULL,
+            amount INTEGER NOT NULL CHECK(amount > 0),
+            fee INTEGER NOT NULL DEFAULT 0 CHECK(fee >= 0),
+            candidates_json TEXT NOT NULL, request_id TEXT NOT NULL,
+            created_ts INTEGER NOT NULL, expires_ts INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending'
+                CHECK(status IN ('pending','caught','escaped','cancelled')),
+            guessed_id INTEGER, guess_request_id TEXT, resolved_ts INTEGER,
+            UNIQUE(thief_id, request_id)
+        )""")
+        fields = ("id,thief_id,victim_id,thief_username,victim_username,amount,fee,"
+                  "candidates_json,request_id,created_ts,expires_ts,created_at,status,"
+                  "guessed_id,guess_request_id,resolved_ts")
+        db.x(f"INSERT INTO strawberry_thefts_v4 ({fields}) SELECT {fields} FROM strawberry_thefts")
+        db.x("DROP TABLE strawberry_thefts")
+        db.x("ALTER TABLE strawberry_thefts_v4 RENAME TO strawberry_thefts")
+        db.x("""CREATE UNIQUE INDEX ux_strawberry_pending_victim
+              ON strawberry_thefts(victim_id) WHERE status='pending'""")
+        db.x("""CREATE UNIQUE INDEX ux_strawberry_pending_thief
+              ON strawberry_thefts(thief_id) WHERE status='pending'""")
+        db.x("CREATE INDEX ix_strawberry_expiry ON strawberry_thefts(status,expires_ts)")
+        db.x("CREATE INDEX ix_strawberry_thief_recent ON strawberry_thefts(thief_id,created_ts DESC)")
+        # Old fee was already subtracted from the thief's spendable balance.
+        # Return it exactly once before removing the old pending fee.
+        for r in db.q("""SELECT thief_id,SUM(fee) AS fee FROM strawberry_thefts
+                  WHERE status='pending' GROUP BY thief_id HAVING SUM(fee)>0"""):
+            if db.one("SELECT id FROM users WHERE id=?", (r["thief_id"],)):
+                _credit(r["thief_id"], r["fee"])
+        db.x("UPDATE strawberry_thefts SET fee=0 WHERE status='pending'")
+
+
 
 
 def _user(request: Request) -> dict:
@@ -99,28 +148,36 @@ def _credit(uid: int, amount: int):
     db.x("UPDATE slot_accounts SET balance=balance+?,updated_at=CURRENT_TIMESTAMP WHERE user_id=?", (amount,uid))
 
 
+def _announcement_name(user: dict | None, fallback: str) -> str:
+    # A human-facing display name (unlike username) can contain whitespace.
+    if not user:
+        return fallback.upper()
+    return ((user.get("display_name") or "").strip() or user["username"]).upper()
+
+
 def _finish(row: dict, outcome: str, now: int, guessed_id=None, guess_req=None):
     """Called inside db.tx only. Escrow is disbursed exactly once."""
     if row["status"] != "pending":
         return
-    thief = db.one("SELECT id FROM users WHERE id=?", (row["thief_id"],))
-    victim = db.one("SELECT id FROM users WHERE id=?", (row["victim_id"],))
+    thief = db.one("SELECT id,username,display_name FROM users WHERE id=?", (row["thief_id"],))
+    victim = db.one("SELECT id,username,display_name FROM users WHERE id=?", (row["victim_id"],))
     if outcome == "caught":
         if not victim:
             raise HTTPException(409, "Получатель недоступен")
-        _credit(row["victim_id"], row["amount"] + row["fee"])
-        headline = f"{row['thief_username'].upper()} СЛОВИЛ КРЕМПАЙ!!!!!"
+        _credit(row["victim_id"], row["amount"])
+        headline = (f"{_announcement_name(thief, row['thief_username'])} СЛОВИЛ КРЕМПАЙ ОТ "
+                    f"{_announcement_name(victim, row['victim_username'])}!!!!")
     elif outcome == "escaped":
         if not thief:
             raise HTTPException(409, "Получатель недоступен")
-        _credit(row["thief_id"], row["amount"] + row["fee"])
-        headline = f"{row['victim_username'].upper()} ОТКЛУБНИЧЕН ПО ПОЛНОЙ!!!!!"
+        _credit(row["thief_id"], row["amount"])
+        headline = f"{_announcement_name(victim, row['victim_username'])} ОТКЛУБНИЧЕН ПО ПОЛНОЙ!!!!!"
     elif outcome == "cancelled":
         # The deleted party can no longer claim coins. Return escrow to survivor.
         if thief and not victim:
-            _credit(row["thief_id"], row["amount"] + row["fee"])
+            _credit(row["thief_id"], row["amount"])
         elif victim and not thief:
-            _credit(row["victim_id"], row["amount"] + row["fee"])
+            _credit(row["victim_id"], row["amount"])
         headline = None
     else:
         raise ValueError("Недопустимый исход")
@@ -174,26 +231,28 @@ def overview(uid: int) -> dict:
     now = int(time.time())
     acc = slots.ensure_account(uid)
     held = db.val("SELECT COALESCE(SUM(amount),0) FROM strawberry_thefts WHERE thief_id=? AND status='pending'", (uid,), 0)
-    reserve = db.val("SELECT COALESCE(SUM(fee),0) FROM strawberry_thefts WHERE thief_id=? AND status='pending'", (uid,), 0)
-    return {"friends":_friends(uid),"pending":_pending(uid),"balance":acc["balance"],
-            "frozen":held,"collateral":reserve,"has_active_theft":bool(held),
+    friends = _friends(uid)
+    for friend in friends:
+        friend["max_steal"] = slots.ensure_account(friend["id"])["balance"] * MAX_STEAL_PERCENT // 100
+    return {"friends":friends,"pending":_pending(uid),"balance":acc["balance"],
+            "frozen":held,"collateral":0,"has_active_theft":bool(held),
             "cooldown_remaining":_cooldown(uid,now),"cooldown_seconds":STEAL_COOLDOWN,
-            "min_steal":MIN_STEAL,"max_steal":MAX_STEAL,"answer_seconds":ANSWER_SECONDS,
+            "min_steal":MIN_STEAL,"max_steal_percent":MAX_STEAL_PERCENT,"answer_seconds":ANSWER_SECONDS,
             "rules":"Украденные жетоны заморожены до ответа или истечения 24 часов. "
-                    "Если жертва угадает — ей вернут сумму и 5% компенсации из заранее зарезервированных средств вора. "
+                    "Если жертва угадает — ей вернут украденную сумму без компенсации. "
                     "Если не угадает или не ответит за 24 часа — замороженные жетоны достанутся вору."}
 
 
-def steal(thief_id: int, victim_id: int, request_id: str) -> dict:
+def steal(thief_id: int, victim_id: int, amount: int, request_id: str) -> dict:
     if thief_id == victim_id:
         raise HTTPException(400, "Нельзя отклубничить самого себя")
     expire_thefts()
     with db.tx():
         old = db.one("SELECT * FROM strawberry_thefts WHERE thief_id=? AND request_id=?", (thief_id,request_id))
         if old:
-            if old["victim_id"] != victim_id:
+            if old["victim_id"] != victim_id or old["amount"] != amount:
                 raise HTTPException(409, "Один request_id нельзя использовать для разных целей")
-            return {"id":old["id"],"amount":old["amount"],"reserved_fee":old["fee"],"frozen":old["status"]=="pending",
+            return {"id":old["id"],"amount":old["amount"],"reserved_fee":0,"frozen":old["status"]=="pending",
                     "replayed":True,"balance":slots.ensure_account(thief_id)["balance"]}
         thief = db.one("SELECT id,username,banned FROM users WHERE id=?", (thief_id,))
         if not thief or thief["banned"]:
@@ -211,33 +270,28 @@ def steal(thief_id: int, victim_id: int, request_id: str) -> dict:
         if cd:
             raise HTTPException(429, f"Следующая кража через {cd} сек.")
         ta,va = slots.ensure_account(thief_id),slots.ensure_account(victim_id)
-        if va["balance"] <= 0:
-            raise HTTPException(400, "У друга нет доступных жетонов")
-        if ta["balance"] < 1:
-            raise HTTPException(400, "Нужен минимум 1 свой жетон для резерва компенсации")
-        upper = min(MAX_STEAL,va["balance"],ta["balance"]*20)
-        lower = min(MIN_STEAL,upper)
-        amount = secrets.randbelow(upper-lower+1)+lower
-        fee = (amount+19)//20  # 5% вверх до целого жетона
-        if fee > ta["balance"]:
-            raise HTTPException(400, "Не хватает жетонов для резерва компенсации")
+        max_allowed = va["balance"] * MAX_STEAL_PERCENT // 100
+        if max_allowed < MIN_STEAL:
+            raise HTTPException(400, "У друга недостаточно жетонов для кражи")
+        if amount < MIN_STEAL or amount > max_allowed:
+            raise HTTPException(400, f"Максимальная сумма кражи сейчас — {max_allowed} жетонов (30% доступного баланса друга)")
+        fee = 0
         # Spendable balances drop immediately. The escrow value is recorded only
         # in pending theft; no API can spend it before resolution.
         db.x("UPDATE slot_accounts SET balance=balance-?,updated_at=CURRENT_TIMESTAMP WHERE user_id=?", (amount,victim_id))
-        db.x("UPDATE slot_accounts SET balance=balance-?,updated_at=CURRENT_TIMESTAMP WHERE user_id=?", (fee,thief_id))
         stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
         rid = db.x("""INSERT INTO strawberry_thefts(thief_id,victim_id,thief_username,victim_username,
             amount,fee,candidates_json,request_id,created_ts,expires_ts,created_at)
             VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
             (thief_id,victim_id,thief["username"],victim["username"],amount,fee,
              json.dumps(candidates,ensure_ascii=False),request_id,now,now+ANSWER_SECONDS,stamp))
-        return {"id":rid,"amount":amount,"frozen":True,"reserved_fee":fee,
-                "replayed":False,"balance":ta["balance"]-fee}
+        return {"id":rid,"amount":amount,"frozen":True,"reserved_fee":0,
+                "replayed":False,"balance":ta["balance"]}
 
 
 def _view(row: dict, replayed: bool):
     return {"theft_id":row["id"],"caught":row["status"]=="caught",
-            "amount":row["amount"],"compensation":row["fee"] if row["status"]=="caught" else 0,
+            "amount":row["amount"],"compensation":0,
             "status":row["status"],"replayed":replayed}
 
 
@@ -275,9 +329,9 @@ def on_user_delete(uid: int):
         for row in rows:
             if row["thief_id"]==uid:
                 # Future deletion of thief: stolen principal goes back to victim.
-                _credit(row["victim_id"],row["amount"]+row["fee"])
+                _credit(row["victim_id"],row["amount"])
             else:
-                _credit(row["thief_id"],row["amount"]+row["fee"])
+                _credit(row["thief_id"],row["amount"])
             db.x("UPDATE strawberry_thefts SET status='cancelled',resolved_ts=? WHERE id=?", (now,row["id"]))
         # Keep records without holding data about a deleted user.
         db.x("DELETE FROM strawberry_thefts WHERE thief_id=? OR victim_id=?", (uid,uid))
@@ -295,9 +349,12 @@ async def get_state(request: Request):
 
 @router.post("/steal")
 async def post_steal(request: Request, body: TheftIn):
-    return await run_in_threadpool(steal,_user(request)["id"],body.victim_id,body.request_id)
+    return await run_in_threadpool(steal,_user(request)["id"],body.victim_id,body.amount,body.request_id)
 
 
 @router.post("/guess")
 async def post_guess(request: Request, body: GuessIn):
     return await run_in_threadpool(guess,_user(request)["id"],body.theft_id,body.suspect_id,body.request_id)
+
+# STRAWBERRY_RULES_20261011_V4
+# STRAWBERRY_CAUGHT_NAMES_20261011_V5
