@@ -33,7 +33,12 @@ router = APIRouter(prefix="/api/letuchki", tags=["Летучки"])
 DEFAULT_SUBJECT = "Операционные системы"
 XP_CORRECT, XP_PARTIAL = 15, 7      # опыт за вопрос, только за первое прорешивание
 OK_SCORE, PARTIAL_SCORE = 0.55, 0.22
-MAX_ANSWER = 6000
+MAX_ANSWER = 6000          # абсолютный предел длины любого ответа
+MIN_CAP, CAP_FACTOR = 600, 3  # ответ не длиннее max(600, 3 × длина эталона) символов: длинная «солянка» из ключевых слов не принимается
+PREC_FLOOR = 0.2           # доля слов ответа, совпавших с эталоном, ниже которой оценка снижается (штраф за слова не по теме)
+MIN_OPEN_SECONDS = 20      # вариант засчитывается в достижения, только если с открытия страницы прошло не меньше (скрипт не «решает» мгновенно)
+GLOBAL_PASS_GAP = 60       # и не чаще одного засчитанного прохождения в минуту у человека (по всем вариантам)
+DAILY_PASS_CAP = 40        # и не больше 40 засчитанных прохождений в сутки (дальше летучки решаются, но в достижения не идут)
 PASS_COOLDOWN = 30   # один и тот же вариант засчитывается в достижения не чаще, чем раз в 30 секунд
 
 
@@ -57,6 +62,18 @@ def init_schema():
             answer TEXT NOT NULL,
             draw INTEGER NOT NULL DEFAULT 0,
             UNIQUE(set_id, idx)
+        );
+        CREATE TABLE IF NOT EXISTS lt_opened (
+            user_id INTEGER NOT NULL,
+            set_id INTEGER NOT NULL,
+            opened_ts INTEGER NOT NULL,
+            PRIMARY KEY(user_id, set_id)
+        );
+        CREATE TABLE IF NOT EXISTS lt_daily (
+            user_id INTEGER NOT NULL,
+            day TEXT NOT NULL,
+            n INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY(user_id, day)
         );
         CREATE TABLE IF NOT EXISTS lt_results (
             user_id INTEGER NOT NULL,
@@ -164,19 +181,35 @@ def _points(md: str) -> list[set[str]]:
     return pts
 
 
-def grading_score(answer: str, reference: str) -> float:
+def grading_score(answer: str, reference: str, title: str = "") -> float:
     """Насколько ответ ученика близок к эталону (0…1): доля слов эталона, которые есть в ответе, и доля пунктов эталона, покрытых ответом."""
     ans = (answer or "").strip()
     a = grading.stems(ans)
     if len(ans) < 12 or len(a) < 2:
         return 0.0
     ref = grading.stems(_clean(reference))
-    if not ref:
+    given = grading.stems(title)          # слова самого вопроса ученик видит сразу: повтор вопроса в ответе ничего не доказывает
+    if len(ref - given) >= 3:
+        ref -= given
+        a = a - given
+    if not ref or len(a) < 2:
         return 0.0
-    cov = len(ref & a) / len(ref)
-    pts = _points(reference)
+    inter = ref & a
+    cov = len(inter) / len(ref)
+    pts = [p - given for p in _points(reference)]
+    pts = [p for p in pts if len(p) >= 2]
     hit = sum(1 for p in pts if len(p & a) / len(p) >= 0.5) / len(pts) if pts else 0.0
-    return min(1.0, max(cov * 1.35, hit * 0.9 + cov * 0.2))
+    score = min(1.0, max(cov * 1.35, hit * 0.9 + cov * 0.2))
+    # ответ, набитый словами не по теме (подбор ключевых слов «наугад»), теряет оценку пропорционально доле лишних слов
+    prec = len(inter) / len(a)
+    if len(a) >= 12 and prec < PREC_FLOOR:
+        score *= prec / PREC_FLOOR
+    return score
+
+
+def answer_cap(reference: str) -> int:
+    """Наибольшая допустимая длина ответа на вопрос с таким эталоном."""
+    return min(MAX_ANSWER, max(MIN_CAP, CAP_FACTOR * len(reference or "")))
 
 
 def verdict_of(score: float) -> str:
@@ -202,9 +235,12 @@ def check(user_id: int, set_id: int, answers: list[str]) -> dict:
     qs = db.q("SELECT idx, title, answer, draw FROM lt_questions WHERE set_id=? ORDER BY idx", (set_id,))
     if len(answers) != len(qs):
         raise ValueError(f"Нужно ответить на все вопросы ({len(qs)})")
+    for i, (q, a) in enumerate(zip(qs, answers), 1):
+        if len(a) > answer_cap(q["answer"]):
+            raise ValueError(f"Ответ на вопрос {i} слишком длинный: не больше {answer_cap(q['answer'])} символов. Опиши коротко и по сути.")
     items, xp = [], 0
     for q, a in zip(qs, answers):
-        sc = grading_score(a, q["answer"])
+        sc = grading_score(a, q["answer"], q["title"])
         v = verdict_of(sc)
         items.append({"verdict": v, "score": round(sc, 2), "reference": q["answer"]})
     overall = overall_of([i["verdict"] for i in items])
@@ -213,7 +249,24 @@ def check(user_id: int, set_id: int, answers: list[str]) -> dict:
         row = db.one("SELECT * FROM lt_results WHERE user_id=? AND set_id=?", (user_id, set_id))
         first = row is None
         # засчитанное прохождение (идёт в достижения, повторные тоже): не «неверно» и не чаще раза в PASS_COOLDOWN секунд на вариант
-        counted = overall != "fail" and (first or now - (row["last_pass_ts"] or 0) >= PASS_COOLDOWN)
+        opened = db.val("SELECT opened_ts FROM lt_opened WHERE user_id=? AND set_id=?", (user_id, set_id), 0) or 0
+        last_any = db.val("SELECT MAX(last_pass_ts) FROM lt_results WHERE user_id=?", (user_id,), 0) or 0
+        db.x("DELETE FROM lt_opened WHERE user_id=? AND set_id=?", (user_id, set_id))   # одно открытие страницы — одна попытка
+        if overall == "fail":
+            reason = "fail"
+        elif not opened or now - opened < MIN_OPEN_SECONDS:
+            reason = "fast"          # решено быстрее, чем можно написать ответ, или без открытия летучки
+        elif now - last_any < GLOBAL_PASS_GAP:
+            reason = "too_often"     # не чаще одного засчитанного прохождения в минуту
+        elif not first and now - (row["last_pass_ts"] or 0) < PASS_COOLDOWN:
+            reason = "same_set"
+        elif (db.val("SELECT n FROM lt_daily WHERE user_id=? AND day=?", (user_id, gm.today()), 0) or 0) >= DAILY_PASS_CAP:
+            reason = "daily_cap"
+        else:
+            reason = ""
+        counted = not reason
+        if counted:
+            db.x("INSERT INTO lt_daily(user_id,day,n) VALUES(?,?,1) ON CONFLICT(user_id,day) DO UPDATE SET n=n+1", (user_id, gm.today()))
         if first:
             xp = sum(XP_CORRECT if i["verdict"] == "correct" else XP_PARTIAL if i["verdict"] == "partial" else 0 for i in items)
             db.x("INSERT INTO lt_results(user_id,set_id,attempts,first_overall,best_overall,xp,last_ts,passed,last_pass_ts) VALUES(?,?,1,?,?,?,?,?,?)",
@@ -227,7 +280,7 @@ def check(user_id: int, set_id: int, answers: list[str]) -> dict:
     new_ach = gm.check_achievements(user_id) if counted else []
     nxt = next_set(set_id)
     return {"overall": overall, "items": items, "first": first, "xp": xp, "next": nxt, "subject_id": s["subject_id"],
-            "attempts": (row["attempts"] if row else 0) + 1, "counted": counted, "passed_total": passed_total, "achievements": new_ach,
+            "attempts": (row["attempts"] if row else 0) + 1, "counted": counted, "reason": reason, "passed_total": passed_total, "achievements": new_ach,
             "next_goal": next((n for n, *_ in gm.LT_STEPS if n > passed_total), None)}
 
 
@@ -286,8 +339,10 @@ async def get_set(set_id: int, request: Request):
                       JOIN lt_subjects s ON s.id=t.subject_id WHERE t.id=?""", (set_id,))
         if not s:
             raise HTTPException(404, "Летучка не найдена")
-        s["questions"] = [{"idx": q["idx"], "title": q["title"], "draw": bool(q["draw"])} for q in
-                          db.q("SELECT idx, title, draw FROM lt_questions WHERE set_id=? ORDER BY idx", (set_id,))]
+        s["questions"] = [{"idx": q["idx"], "title": q["title"], "draw": bool(q["draw"]), "max_len": answer_cap(q["answer"])} for q in
+                          db.q("SELECT idx, title, draw, answer FROM lt_questions WHERE set_id=? ORDER BY idx", (set_id,))]
+        db.x("""INSERT INTO lt_opened(user_id,set_id,opened_ts) VALUES(?,?,?)
+                ON CONFLICT(user_id,set_id) DO UPDATE SET opened_ts=excluded.opened_ts""", (u["id"], set_id, int(time.time())))
         r = db.one("SELECT attempts, best_overall, xp FROM lt_results WHERE user_id=? AND set_id=?", (u["id"], set_id))
         s["attempts"], s["best"], s["xp"] = (r["attempts"], r["best_overall"], r["xp"]) if r else (0, None, 0)
         s["next"] = next_set(set_id)
@@ -298,7 +353,7 @@ async def get_set(set_id: int, request: Request):
 @router.post("/sets/{set_id}/check")
 async def check_set(set_id: int, body: CheckIn, request: Request):
     u = auth.require_user(request)
-    answers = [a[:MAX_ANSWER] for a in body.answers]
+    answers = list(body.answers)
     try:
         res = await run_in_threadpool(check, u["id"], set_id, answers)
     except KeyError:

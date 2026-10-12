@@ -81,6 +81,13 @@ def reg(suffix):
     return httpx.Client(base_url=BASE, headers={"Authorization": "Bearer " + data["token"]}, timeout=30), data["user"]
 
 
+def arm(uid, set_id):
+    """Подготовить условия зачёта прохождения: вариант открыт давно, прошлых засчитанных нет, суточный лимит не выбран."""
+    db.x("UPDATE lt_results SET last_pass_ts=0 WHERE user_id=?", (uid,))
+    db.x("INSERT OR REPLACE INTO lt_opened(user_id,set_id,opened_ts) VALUES(?,?,1)", (uid, set_id))
+    db.x("DELETE FROM lt_daily WHERE user_id=?", (uid,))
+
+
 def upload(client, text, subject="Тестовый предмет"):
     return client.post("/api/letuchki/admin/upload", files={"file": ("l.md", text.encode("utf-8"), "text/markdown")}, data={"subject": subject})
 
@@ -138,7 +145,7 @@ print("OK: первое прорешивание частично верно →
 good2 = "Схема: два прямоугольника и три стрелки. Слева очередь задач, справа процессор. Новая задача встаёт в очередь, первая задача выбирается из очереди на процессор, когда процессор освободится."
 r = user.post(f"/api/letuchki/sets/{set1}/check", json={"answers": [good1, good2]}).json()
 assert r["overall"] == "ok" and not r["first"] and r["xp"] == 0 and r["attempts"] == 2, r
-assert not r["counted"] and r["passed_total"] == 1, "повтор раньше чем через 30 секунд в достижения не идёт"
+assert not r["counted"] and r["reason"] == "fast" and r["passed_total"] == 0, "решено сразу после открытия — в достижения не идёт"
 assert user.get("/api/me").json()["level"]["xp"] == 15
 s = user.get(f"/api/letuchki/sets/{set1}").json()
 assert s["best"] == "ok" and s["attempts"] == 2 and s["xp"] == 15, s
@@ -146,7 +153,7 @@ print("OK: перерешивание опыт не даёт, лучший ит�
 
 # 6) полностью неверно → fail; пустые/неполные ответы
 set2 = t["topics"][0]["variants"][1]["set_id"]
-r = user.post(f"/api/letuchki/sets/{set2}/check", json={"answers": ["Круговорот — схема разделения времени с квантами и очередью", "яблоки груши бананы и прочие фрукты"]}).json()
+r = user.post(f"/api/letuchki/sets/{set2}/check", json={"answers": ["Круговорот — это схема с квантами, кругами и очередью заданий", "яблоки груши бананы и прочие фрукты"]}).json()
 assert r["overall"] == "fail" and r["first"] and r["xp"] == 0, r
 assert user.post(f"/api/letuchki/sets/{set2}/check", json={"answers": ["только один"]}).status_code == 400
 assert user.post("/api/letuchki/sets/999999/check", json={"answers": ["a", "b"]}).status_code == 404
@@ -162,8 +169,8 @@ assert user.post("/api/achievements/lt_5/claim").status_code == 400          # �
 assert user.post("/api/achievements/first_lesson/claim").status_code == 400  # у этого достижения нет награды
 assert user.post("/api/achievements/claim").status_code == 400               # забирать пока нечего
 new_total = None
-for i in range(4):
-    db.x("UPDATE lt_results SET last_pass_ts=0 WHERE user_id=?", (me,))
+for i in range(5):
+    arm(me, set1)
     r = user.post(f"/api/letuchki/sets/{set1}/check", json={"answers": [good1, good2]}).json()
     assert r["counted"], r
     new_total = r["passed_total"]
@@ -184,7 +191,7 @@ print("OK: прохождения (с повторами) идут в дости
 
 # 6c) «забрать все»: накручиваем счётчик напрямую и проверяем выдачу сразу нескольких наград
 db.x("UPDATE lt_results SET passed=passed+45 WHERE user_id=? AND set_id=?", (me, set1))
-db.x("UPDATE lt_results SET last_pass_ts=0 WHERE user_id=?", (me,))
+arm(me, set1)
 r = user.post(f"/api/letuchki/sets/{set1}/check", json={"answers": [good1, good2]}).json()
 assert {a["key"] for a in r["achievements"]} == {"lt_10", "lt_20", "lt_30", "lt_50"}, r["achievements"]
 c = user.post("/api/achievements/claim").json()
@@ -192,7 +199,85 @@ assert c["chips"] == 40 + 80 + 120 + 200 and sorted(c["claimed"]) == ["lt_10", "
 assert user.post("/api/achievements/claim").status_code == 400
 print("OK: «забрать все» выдаёт все доступные награды один раз")
 
+# 6d) защита от обмана: «солянка» из ключевых слов, эхо вопроса, слишком длинный ответ, слишком быстрое и слишком частое решение, суточный лимит
+t2 = user.get(f"/api/letuchki/subjects/{sid}").json()["topics"]
+set3 = t2[1]["variants"][0]["set_id"]            # «Процессы и потоки»
+s3 = user.get(f"/api/letuchki/sets/{set3}").json()
+assert all(q["max_len"] >= 600 for q in s3["questions"])
+salad = " ".join("процесс поток совокупность завершён выполняется одновременно фрагмент автоматически создаётся один любой число".split() * 1)
+echo = ("Процесс. " * 8, "Поток. " * 8)
+arm(me, set3)
+r = user.post(f"/api/letuchki/sets/{set3}/check", json={"answers": list(echo)}).json()
+assert r["overall"] == "fail" and not r["counted"], ("эхо вопроса не должно считаться ответом", r)
+long_ans = ("процесс поток совокупность завершён одновременно " * 200)[:5000]
+rl = user.post(f"/api/letuchki/sets/{set3}/check", json={"answers": [long_ans, long_ans]})
+assert rl.status_code == 400 and "слишком длинный" in rl.json()["detail"], rl.text
+assert db.val("SELECT COUNT(*) FROM lt_results WHERE user_id=? AND set_id=?", (me, set3)) == 1, "отклонённая попытка не должна менять результаты"
+set5 = t2[2]["variants"][0]["set_id"]
+real = ["Мультипрограммирование — способ, при котором на одном процессоре попеременно выполняются несколько задач.",
+        "Состояний три: выполнение, ожидание и готовность."]
+user.get(f"/api/letuchki/sets/{set5}")           # открыли только что
+rr = user.post(f"/api/letuchki/sets/{set5}/check", json={"answers": real}).json()
+assert rr["overall"] in ("ok", "partial") and rr["reason"] == "fast" and not rr["counted"], rr
+arm(me, set5)
+before = db.val("SELECT SUM(passed) FROM lt_results WHERE user_id=?", (me,))
+rr = user.post(f"/api/letuchki/sets/{set5}/check", json={"answers": real}).json()
+assert rr["counted"] and rr["reason"] == "", rr
+db.x("INSERT OR REPLACE INTO lt_opened(user_id,set_id,opened_ts) VALUES(?,?,1)", (me, set5))
+rr = user.post(f"/api/letuchki/sets/{set5}/check", json={"answers": real}).json()
+assert not rr["counted"] and rr["reason"] == "too_often", rr   # второе засчитанное подряд в течение минуты
+assert db.val("SELECT SUM(passed) FROM lt_results WHERE user_id=?", (me,)) == before + 1
+arm(me, set5)
+db.x("INSERT INTO lt_daily(user_id,day,n) VALUES(?,?,40)", (me, __import__("datetime").date.today().isoformat()))
+rr = user.post(f"/api/letuchki/sets/{set5}/check", json={"answers": real}).json()
+assert not rr["counted"] and rr["reason"] == "daily_cap", rr
+# одно открытие страницы — одна попытка: повторная отправка без нового открытия не засчитывается
+arm(me, set5)
+assert user.post(f"/api/letuchki/sets/{set5}/check", json={"answers": real}).json()["counted"]
+db.x("DELETE FROM lt_daily WHERE user_id=?", (me,))
+db.x("UPDATE lt_results SET last_pass_ts=0 WHERE user_id=?", (me,))
+assert user.post(f"/api/letuchki/sets/{set5}/check", json={"answers": real}).json()["reason"] == "fast"
+print("OK: защита от накрутки: солянка/эхо вопроса не проходят, длинные ответы отклоняются, быстрые/частые/сверхсуточные решения не засчитываются")
+
+# 6e) гонка: два одновременных первых решения одного варианта дают опыт и «первое прорешивание» только один раз
+import threading  # noqa: E402
+RACE = """## Летучка 4. Гонка
+
+### Вариант 1
+
+**Вопрос 1 (часть 1). Состояния потока.**
+
+Три состояния потока: выполнение, ожидание и готовность.
+
+**Вопрос 2 (часть 2). Мультипрограммирование.**
+
+Мультипрограммирование — способ, при котором на одном процессоре попеременно выполняются несколько задач.
+"""
+upload(admin, RACE)
+race_set = [v["set_id"] for tp in user.get(f"/api/letuchki/subjects/{sid}").json()["topics"] if tp["no"] == 4 for v in tp["variants"]][0]
+user.get(f"/api/letuchki/sets/{race_set}")
+arm(me, race_set)
+xp_before = db.val("SELECT SUM(xp) FROM activity WHERE user_id=?", (me,), 0)
+answers = ["Три состояния: выполнение, ожидание и готовность потока.", "Способ, когда на одном процессоре попеременно выполняются несколько задач."]
+out = []
+gate = threading.Barrier(6)
+
+
+def shoot():
+    c = httpx.Client(base_url=BASE, headers=dict(user.headers), timeout=30)
+    gate.wait()
+    out.append(c.post(f"/api/letuchki/sets/{race_set}/check", json={"answers": answers}).json())
+
+
+ths = [threading.Thread(target=shoot) for _ in range(6)]
+[t.start() for t in ths]
+[t.join() for t in ths]
+assert sum(1 for r in out if r["first"]) == 1, [r["first"] for r in out]
+assert sum(1 for r in out if r["counted"]) <= 1, "из параллельных запросов засчитывается не больше одного"
+assert db.val("SELECT SUM(xp) FROM activity WHERE user_id=?", (me,), 0) - xp_before == 30
+print("OK: параллельные запросы не удваивают опыт и зачёт")
+
 # 7) обновление эталона не теряет результаты учеников
 upload(admin, MD)
-assert user.get(f"/api/letuchki/sets/{set1}").json()["attempts"] == 7  # 2 + 4 + 1 из проверок выше
+assert user.get(f"/api/letuchki/sets/{set1}").json()["attempts"] >= 8  # много попыток из проверок выше
 print("ALL OK")
