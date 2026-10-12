@@ -119,7 +119,38 @@ assert [x["title"] for x in last][-2:] == ["Прерывания", "Ещё од�
 assert snapshot(mine).items() >= after.items()
 print("OK: поздние копии получают дополнение сразу, следующее дополнение добавляется после предыдущего")
 
-# 6) настоящий файл дополнения (если подготовлен) применяется к копии и даёт модули с готовыми уроками
+# 6) копии, потерявшие связь с каталогом (после «Импорта с заменой» origin_id указывает на удалённый шаблон; у личного курса админа его нет),
+#    находятся по составу материалов, получают дополнение и снова привязываются к шаблону
+db.x("UPDATE courses SET origin_id=NULL WHERE id=?", (lc,))
+db.x("UPDATE courses SET origin_id=987654 WHERE id=?", (mine,))
+before_mine = snapshot(mine)
+pkg3 = synthetic("лекция7.txt", 777)
+pkg3["chunk_base"] = 300
+pkg3["chunks"] = [{"idx": 301, "text": "Третий фрагмент.", "digest": None}]
+pkg3["modules"][0]["title"] = "Третья тема"
+pkg3["modules"][0]["chunk_ids"] = json.dumps([301])
+res = upload(admin, 102, pkg3).json()
+assert res["relinked"] == 2 and res["copies_added"] == 3, res
+for cid in (lc, mine):
+    assert db.val("SELECT origin_id FROM courses WHERE id=?", (cid,)) == tmpl
+    assert db.one("SELECT 1 AS x FROM modules WHERE course_id=? AND title='Третья тема'", (cid,)), cid
+assert snapshot(mine).items() >= before_mine.items()
+# чужой курс с другими материалами не затрагивается
+other = admin.post("/api/courses", files=[("files", ("o.txt", ("Совсем другая тема про сети. " * 30).encode(), "text/plain"))], data={"title": "Чужой"}).json()["id"]
+for _ in range(100):
+    if admin.get(f"/api/courses/{other}").json()["status"] == "ready":
+        break
+    time.sleep(0.3)
+n_other = db.val("SELECT COUNT(*) FROM modules WHERE course_id=?", (other,))
+pkg4 = synthetic("лекция8.txt", 888)
+pkg4["chunk_base"] = 400
+pkg4["chunks"] = [{"idx": 401, "text": "Четвёртый.", "digest": None}]
+pkg4["modules"][0]["chunk_ids"] = json.dumps([401])
+assert upload(admin, 102, pkg4).json()["relinked"] == 0
+assert db.val("SELECT COUNT(*) FROM modules WHERE course_id=?", (other,)) == n_other
+print("OK: потерявшие связь копии находятся по материалам и привязываются заново, посторонние курсы не трогаются")
+
+# 7) настоящий файл дополнения (если подготовлен) применяется к копии и даёт модули с готовыми уроками
 real = os.path.join(root, "catalog_supplement_102_4.json")
 if os.path.exists(real):
     rp = json.load(open(real, encoding="utf-8"))

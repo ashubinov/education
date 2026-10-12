@@ -243,7 +243,9 @@ def import_all(data: dict, replace: bool = False) -> dict:
         if old:
             delete_course(old["id"])
             replaced.append(no)
-        write_tree(t, sysid, template=True, catalog_no=no)
+        new_id = write_tree(t, sysid, template=True, catalog_no=no)
+        if old:  # копии пользователей остаются привязанными к каталожному курсу (иначе дополнения до них не дойдут)
+            db.x("UPDATE courses SET origin_id=? WHERE origin_id=? AND is_template=0", (new_id, old["id"]))
         added.append(no)
     removed = dedupe_templates()  # на случай, если в файле дубликаты уже имеющихся курсов под другими номерами
     added = [n for n in added if n not in removed]
@@ -323,6 +325,30 @@ def _apply_supplement_to(course_id: int, pkg: dict) -> str:
     return "added"
 
 
+def _source_sig(course_id: int) -> tuple:
+    """Состав материалов курса: (имя файла, число символов) по каждому файлу. Одинаковый состав — тот же курс."""
+    return tuple(sorted((r["filename"], int(r["chars"] or 0)) for r in db.q("SELECT filename, chars FROM sources WHERE course_id=?", (course_id,))))
+
+
+def relink_copies(template_id: int, pkg_sources: list[tuple] | None = None) -> int:
+    """Привязать к шаблону курсы, потерявшие связь с каталогом: origin_id пуст или указывает на удалённый шаблон
+    (так бывает после «Импорта с заменой» или у курса, из которого админ публиковал шаблон), если материалы у них те же."""
+    full = _source_sig(template_id)
+    if not full:
+        return 0
+    base = list(full)  # состав шаблона без файлов дополнения (шаблон мог уже получить его при прошлой загрузке)
+    for m in pkg_sources or []:
+        if m in base:
+            base.remove(m)
+    ok = {full, tuple(base)}
+    n = 0
+    for c in db.q("""SELECT id FROM courses WHERE is_template=0 AND (origin_id IS NULL OR origin_id NOT IN (SELECT id FROM courses)) ORDER BY id"""):
+        if _source_sig(c["id"]) in ok:
+            db.x("UPDATE courses SET origin_id=? WHERE id=?", (template_id, c["id"]))
+            n += 1
+    return n
+
+
 def apply_supplement(number: int, pkg: dict) -> dict:
     """Применить дополнение к курсу каталога №number и ко всем копиям, которые добавили пользователи. Прогресс не затрагивается."""
     if pkg.get("kind") != "supplement" or not pkg.get("modules") or not pkg.get("lessons"):
@@ -330,7 +356,8 @@ def apply_supplement(number: int, pkg: dict) -> dict:
     t = find(number)
     if not t:
         raise KeyError("catalog")
-    out = {"template": _apply_supplement_to(t["id"], pkg), "copies_added": 0, "copies_skipped": 0}
+    relinked = relink_copies(t["id"], [(x["filename"], int(x.get("chars") or 0)) for x in pkg.get("sources", [])])
+    out = {"template": _apply_supplement_to(t["id"], pkg), "copies_added": 0, "copies_skipped": 0, "relinked": relinked}
     for c in db.q("SELECT id FROM courses WHERE origin_id=? AND is_template=0 ORDER BY id", (t["id"],)):
         out["copies_added" if _apply_supplement_to(c["id"], pkg) == "added" else "copies_skipped"] += 1
     return out
