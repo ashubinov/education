@@ -17,7 +17,7 @@ from . import gamification as gm
 from . import chat
 from . import chat_commands
 from . import chat_telegram_relay
-from . import arena, arena_pvp, farm, lab, minigames, pet, pixels, planner
+from . import arena, arena_pvp, farm, lab, minigames, pet, petun, pixels, planner
 from . import slots_meme
 from .db import db, jd, jl
 from .llm import llm
@@ -36,6 +36,7 @@ async def lifespan(app: FastAPI):
     pet.init_schema()
     arena.init_schema()
     arena_pvp.init_schema()
+    petun.init_schema()
     farm.init_schema()
     lab.init_schema()
     slots_meme.init_schema()
@@ -67,12 +68,18 @@ async def lifespan(app: FastAPI):
     strawberry_task = asyncio.create_task(minigames.expiry_loop())
     relay_task = asyncio.create_task(chat_telegram_relay.worker_loop())
     pvp_task = asyncio.create_task(arena_pvp.expiry_loop())
+    petun_task = asyncio.create_task(petun.expiry_loop())
     try:
         yield
     finally:
         relay_task.cancel()
         try:
             await relay_task
+        except asyncio.CancelledError:
+            pass
+        petun_task.cancel()
+        try:
+            await petun_task
         except asyncio.CancelledError:
             pass
         pvp_task.cancel()
@@ -98,6 +105,7 @@ app.include_router(pixels.router)
 app.include_router(pet.router)
 app.include_router(arena.router)
 app.include_router(arena_pvp.router)
+app.include_router(petun.router)
 app.include_router(farm.router)
 app.include_router(lab.router)
 app.include_router(slots_meme.router)
@@ -242,7 +250,10 @@ async def avatar_image(key: str):
 
 @app.get("/api/me")
 async def get_me(request: Request):
-    return user_public(me(request))
+    u = me(request)
+    out = user_public(u)
+    out["petun"] = await run_in_threadpool(petun.lock_status, u["id"])  # минута «ОТПЕТУНИН» (None — нет блокировки); взведённая запускается здесь
+    return out
 
 
 @app.put("/api/me")

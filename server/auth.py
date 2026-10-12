@@ -181,6 +181,21 @@ def user_from_request(request: Request):
     return u
 
 
+# «Отпетунивание» (server/petun.py): пока идёт минута блокировки, разрешены только курсы и занятия, профиль (GET /api/me) и выход.
+PETUN_MESSAGE = "ОТПЕТУНИН: пока можно только заниматься на курсах или выйти из аккаунта"
+_PETUN_PREFIXES = ("/api/courses", "/api/lessons/", "/api/runs/", "/api/catalog", "/api/stats", "/api/avatars/", "/api/auth/", "/api/reminder", "/api/health")  # /api/stats — на нём строится главный экран курсов
+
+
+def _allowed_while_petun(request: Request) -> bool:
+    path = request.url.path
+    return (path == "/api/me" and request.method == "GET") or path.startswith(_PETUN_PREFIXES)
+
+
+def _petun_locked(uid: int) -> bool:
+    from . import petun  # здесь, чтобы не создавать цикл импорта
+    return petun.is_locked(uid)
+
+
 def require_user(request: Request) -> dict:
     u = user_from_request(request)
     if not u:
@@ -189,4 +204,6 @@ def require_user(request: Request) -> dict:
         raise HTTPException(403, ban_message(u))
     if u.get("must_change") and request.url.path not in MUST_CHANGE_ALLOWED:
         raise HTTPException(403, "Нужно сменить временный пароль")
+    if not _allowed_while_petun(request) and _petun_locked(u["id"]):
+        raise HTTPException(423, PETUN_MESSAGE)
     return u

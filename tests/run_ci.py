@@ -45,6 +45,7 @@ CHECKS = [
     ("tests/test_chat_commands.py", True, False),
     ("tests/test_chat_moderation.py", True, False),
     ("tests/test_minigames.py", True, False),
+    ("tests/test_petun.py", True, False),
     ("tests/test_catalog_admin.py", True, True),
     ("tests/verify_catalog.py", True, True),
 ]
