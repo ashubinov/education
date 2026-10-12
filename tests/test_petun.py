@@ -80,7 +80,7 @@ assert r.status_code == 200 and not r.json()["replayed"], r.text
 aid = r.json()["id"]
 assert attack(thief, v["id"], 10).json()["replayed"] is True
 assert attack(thief, o["id"], 10).status_code == 409                  # тот же request_id для другой цели
-assert victim.get("/api/minigames/petun/status").json() == {"pending_count": 1, "latest_pending_id": aid}
+assert victim.get("/api/minigames/petun/status").json() == {"pending_count": 1, "latest_pending_id": aid, "latest_pending_amount": 0}
 start = [x for x in chat_texts(third) if "ТЕБЯ ПЕТУНЯТ ПРЯМО СЕЙЧАС!!!!!" in x]
 assert start and v["username"].upper() in start[-1] and t["username"].upper() not in start[-1], start   # в чате — только жертва
 p = pending(victim)[0]
@@ -158,6 +158,99 @@ assert other.get("/api/me").json()["petun"]["until"] == lock["until"], "повт
 assert chat_texts(third).count(f"{o['username'].upper()} ОТПЕТУНИН ПО ПОЛНОЙ!!!!!") == 1, "таймаут тоже объявляется в чате"
 assert guess(other, aid_o2, t["id"], 39).status_code == 423                          # отпетуненному игры недоступны, а отвечать уже поздно
 
+# =============================== воровство жетонов (как у клубничного вора) ===============================
+cthief, ct = reg("cthief")
+cvictim, cv = reg("cvictim")
+cother, co = reg("cother")
+friends(cthief, ct, cvictim, cv)
+friends(cvictim, cv, cother, co)
+
+
+def bal(client):
+    return client.get("/api/slots/state").json()["balance"]
+
+
+def steal(client, victim_id, n, amount):
+    return client.post("/api/minigames/petun/attack", json={"victim_id": victim_id, "amount": amount, "request_id": rid(n)})
+
+
+def free_victim():
+    """Снять блокировку и «прошло 5 минут» у жертвы."""
+    alter("DELETE FROM petun_locks WHERE user_id=?", (cv["id"],))
+    alter("UPDATE petun_attacks SET created_ts=created_ts-400 WHERE victim_id=?", (cv["id"],))
+
+
+assert bal(cthief) == 1000 and bal(cvictim) == 1000
+st = cthief.get("/api/minigames/petun/state").json()
+assert st["friends"][0]["max_steal"] == 300 and st["max_steal_percent"] == 30 and st["catch_penalty_percent"] == 10 and st["frozen"] == 0
+for bad in (301, -1, 10**12):
+    r = steal(cthief, cv["id"], 200, bad)
+    assert r.status_code in (400, 422), (bad, r.status_code, r.text)
+assert bal(cvictim) == 1000
+
+# жетоны замораживаются сразу, у нападающего не списываются и не прибавляются
+r = steal(cthief, cv["id"], 201, 100)
+assert r.status_code == 200 and r.json()["amount"] == 100, r.text
+cid = r.json()["id"]
+assert bal(cvictim) == 900 and bal(cthief) == 1000
+assert steal(cthief, cv["id"], 201, 50).status_code == 409                    # тот же request_id с другой суммой
+assert steal(cthief, cv["id"], 201, 100).json()["replayed"] is True and bal(cvictim) == 900
+assert cthief.get("/api/minigames/petun/state").json()["frozen"] == 100
+assert cvictim.get("/api/minigames/petun/status").json()["latest_pending_amount"] == 100
+assert pending(cvictim)[0]["amount"] == 100
+
+# не угадал: добыча вору, жертва отпетунена
+g = guess(cvictim, cid, co["id"], 202)
+assert g.status_code == 200 and g.json()["caught"] is False and g.json()["amount"] == 100 and g.json()["lock"], g.text
+assert bal(cthief) == 1100 and cvictim.get("/api/me").status_code == 200
+free_victim()
+assert bal(cvictim) == 900
+
+# угадал: жертва получает украденное и штраф 10 % с вора
+r = steal(cthief, cv["id"], 203, 50)
+assert r.status_code == 200, r.text
+assert bal(cvictim) == 850
+g = guess(cvictim, r.json()["id"], ct["id"], 204)
+assert g.status_code == 200 and g.json()["caught"] is True and g.json()["compensation"] == 5 and g.json()["lock"] is None, g.text
+assert bal(cvictim) == 905 and bal(cthief) == 1095 and bal(cthief) + bal(cvictim) == 2000, (bal(cthief), bal(cvictim))
+assert cthief.get("/api/minigames/petun/state").json()["recent"][0]["penalty"] == 5
+free_victim()
+
+# не ответил за час: добыча вору, у жертвы блокировка при следующем входе
+r = steal(cthief, cv["id"], 205, 40)
+assert r.status_code == 200, r.text
+alter("UPDATE petun_attacks SET expires_ts=? WHERE id=?", (int(time.time()) - 1, r.json()["id"]))
+assert cvictim.get("/api/minigames/petun/status").json()["pending_count"] == 0
+assert bal(cthief) == 1135 and bal(cvictim) == 865 and bal(cthief) + bal(cvictim) == 2000, (bal(cthief), bal(cvictim))
+free_victim()
+
+# штраф не больше свободного баланса вора
+alter("UPDATE slot_accounts SET balance=1 WHERE user_id=?", (ct["id"],))
+alter("UPDATE slot_accounts SET balance=1000 WHERE user_id=?", (cv["id"],))
+r = steal(cthief, cv["id"], 206, 20)
+assert r.status_code == 200, r.text
+g = guess(cvictim, r.json()["id"], ct["id"], 207)
+assert g.json()["caught"] is True and g.json()["compensation"] == 1, g.text
+assert bal(cthief) == 0 and bal(cvictim) == 1001, (bal(cthief), bal(cvictim))
+free_victim()
+
+# amount=0 — просто отпетунить, жетоны не трогаются
+r = steal(cthief, cv["id"], 208, 0)
+assert r.status_code == 200 and r.json()["amount"] == 0 and bal(cvictim) == 1001, r.text
+g = guess(cvictim, r.json()["id"], co["id"], 209)
+assert g.json()["caught"] is False and bal(cthief) == 0, g.text
+free_victim()                                                # жертва отпетунена: баланс смотрим после снятия блокировки
+assert bal(cvictim) == 1001
+
+# у жертвы почти нет жетонов — красть нечего, но отпетунить можно
+free_victim()
+alter("UPDATE slot_accounts SET balance=2 WHERE user_id=?", (cv["id"],))
+r = steal(cthief, cv["id"], 210, 1)
+assert r.status_code == 400 and "недостаточно" in r.json()["detail"], r.text
+assert steal(cthief, cv["id"], 211, 0).status_code == 200
+
+for c in (cthief, cvictim, cother):
+    c.close()
 for c in (thief, victim, other, third, outsider):
     c.close()
 print("OK: отпетунивание — друг, одна атака, раз в 5 минут, угадал/не угадал/не ответил, блокировка только на курсы, идемпотентность")
