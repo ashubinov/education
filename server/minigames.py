@@ -68,13 +68,14 @@ def init_schema():
         );
         CREATE UNIQUE INDEX IF NOT EXISTS ux_strawberry_pending_victim
           ON strawberry_thefts(victim_id) WHERE status='pending';
-        CREATE UNIQUE INDEX IF NOT EXISTS ux_strawberry_pending_thief
-          ON strawberry_thefts(thief_id) WHERE status='pending';
         CREATE INDEX IF NOT EXISTS ix_strawberry_expiry ON strawberry_thefts(status,expires_ts);
         CREATE INDEX IF NOT EXISTS ix_strawberry_thief_recent
           ON strawberry_thefts(thief_id,created_ts DESC);
         """)
+        db.conn.execute("DROP INDEX IF EXISTS ux_strawberry_pending_thief")   # раньше у вора могла быть только одна неразгаданная кража
     _migrate_no_fees()
+    with db.lock:
+        db.conn.execute("DROP INDEX IF EXISTS ux_strawberry_pending_thief")
 
 
 def _migrate_no_fees():
@@ -109,8 +110,6 @@ def _migrate_no_fees():
         db.x("ALTER TABLE strawberry_thefts_v4 RENAME TO strawberry_thefts")
         db.x("""CREATE UNIQUE INDEX ux_strawberry_pending_victim
               ON strawberry_thefts(victim_id) WHERE status='pending'""")
-        db.x("""CREATE UNIQUE INDEX ux_strawberry_pending_thief
-              ON strawberry_thefts(thief_id) WHERE status='pending'""")
         db.x("CREATE INDEX ix_strawberry_expiry ON strawberry_thefts(status,expires_ts)")
         db.x("CREATE INDEX ix_strawberry_thief_recent ON strawberry_thefts(thief_id,created_ts DESC)")
         # Old fee was already subtracted from the thief's spendable balance.
@@ -249,7 +248,7 @@ def overview(uid: int) -> dict:
     for friend in friends:
         friend["max_steal"] = slots.ensure_account(friend["id"])["balance"] * MAX_STEAL_PERCENT // 100
     return {"friends":friends,"pending":_pending(uid),"balance":acc["balance"],
-            "frozen":held,"collateral":0,"has_active_theft":bool(held),
+            "frozen":held,"collateral":0,
             "cooldown_remaining":_cooldown(uid,now),"cooldown_seconds":STEAL_COOLDOWN,
             "min_steal":MIN_STEAL,"max_steal_percent":MAX_STEAL_PERCENT,"catch_penalty_percent":CATCH_PENALTY_PERCENT,"answer_seconds":ANSWER_SECONDS,
             "rules":"Украденные жетоны заморожены до ответа или истечения 24 часов. "
@@ -275,8 +274,6 @@ def steal(thief_id: int, victim_id: int, amount: int, request_id: str) -> dict:
         candidates = _friends(victim_id)
         if not any(x["id"]==thief_id for x in candidates):
             raise HTTPException(409, "Дружба изменилась")
-        if db.one("SELECT id FROM strawberry_thefts WHERE status='pending' AND thief_id=?", (thief_id,)):
-            raise HTTPException(409, "Сначала дождись завершения текущей кражи")
         if db.one("SELECT id FROM strawberry_thefts WHERE status='pending' AND victim_id=?", (victim_id,)):
             raise HTTPException(409, "Друг уже разгадывает другую кражу")
         now = int(time.time())

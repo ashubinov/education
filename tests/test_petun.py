@@ -1,6 +1,6 @@
 """ОТПЕТУНИВАНИЕ (API, сквозной): запускается через tests/run_ci.py на одноразовой базе LQ_DB.
 
-Проверяет: выбор друга, одна неразгаданная атака у нападающего и у жертвы, «раз в 5 минут» на каждого игрока, анонимность до ответа,
+Проверяет: выбор друга, одна неразгаданная атака у жертвы (а нападающий может отпетунить сразу нескольких, не дожидаясь ответов), «раз в 5 минут» на каждого игрока, анонимность до ответа,
 угадал → ничего, не угадал → минута блокировки (на сервере доступны только курсы, профиль и выход), таймаут → блокировка при следующем входе,
 идемпотентность и доступ.
 """
@@ -87,11 +87,11 @@ p = pending(victim)[0]
 assert p["id"] == aid and {c["id"] for c in p["candidates"]} == {t["id"], o["id"], x["id"]}
 assert "thief_id" not in p and "thief_username" not in p
 
-# --- пока друг не ответил, следующего отпетунить нельзя; и жертву второй раз тоже
-r = attack(thief, o["id"], 11); assert r.status_code == 409, r.text
-assert "Сначала дождись" in r.json()["detail"]
+# --- нападающий может отпетунить сразу нескольких; а жертву второй раз (пока она выбирает) отпетунить нельзя
+r = attack(thief, o["id"], 11); assert r.status_code == 200, r.text
+aid_first_o = r.json()["id"]
 r = attack(other, v["id"], 12); assert r.status_code == 409, r.text
-assert thief.get("/api/minigames/petun/state").json()["has_active"] is True
+assert len(thief.get("/api/minigames/petun/state").json()["my_attacks"]) == 2
 
 # --- не угадал: минута блокировки; на сервере доступны только курсы и профиль
 assert guess(outsider, aid, t["id"], 20).status_code == 404
@@ -125,14 +125,12 @@ r = attack(thief, v["id"], 31); assert r.status_code == 429 and "мин." in r.j
 r = attack(third, v["id"], 32); assert r.status_code == 429, r.text
 st = thief.get("/api/minigames/petun/state").json()
 fv = next(f for f in st["friends"] if f["id"] == v["id"])
-assert 0 < fv["wait"] <= 300 and not st["has_active"]
+assert 0 < fv["wait"] <= 300 and len(st["my_attacks"]) == 1
 assert [(a["caught"]) for a in st["recent"]] == [False]
-# другого игрока отпетунить можно сразу (ограничение — на жертву, а не на нападающего)
-r = attack(thief, o["id"], 33); assert r.status_code == 200, r.text
-aid_o = r.json()["id"]
-assert attack(thief, o["id"], 34).status_code == 409                    # у нападающего уже есть неразгаданная
+# ограничение — на жертву, а не на нападающего: атака на o из начала ещё висит, второй раз его отпетунить нельзя
+assert attack(thief, o["id"], 34).status_code == 409
 # жертва угадала — ничего не происходит
-g = guess(other, aid_o, t["id"], 35)
+g = guess(other, aid_first_o, t["id"], 35)
 assert g.status_code == 200 and g.json()["caught"] is True and g.json()["lock"] is None, g.text
 assert other.get("/api/slots/state").status_code == 200 and other.get("/api/me").json()["petun"] is None
 assert thief.get("/api/minigames/petun/state").json()["recent"][0]["caught"] is True
@@ -249,37 +247,48 @@ r = steal(cthief, cv["id"], 210, 1)
 assert r.status_code == 400 and "недостаточно" in r.json()["detail"], r.text
 assert steal(cthief, cv["id"], 211, 0).status_code == 200
 
-# =============================== отмена своей неразгаданной атаки ===============================
-def cancel(client, attack_id):
-    return client.post("/api/minigames/petun/cancel", json={"attack_id": attack_id})
+# =============================== несколько жертв подряд, не дожидаясь ответов ===============================
+bt, btu = reg("bthief")
+bv = [reg(f"bvic{i}") for i in range(3)]
+for c, uu in bv:
+    friends(bt, btu, c, uu)
+friends(bv[0][0], bv[0][1], bv[1][0], bv[1][1])               # у жертв есть ещё друг: кого выбирать при догадке
+ids = []
+for i, (c, uu) in enumerate(bv):                               # по очереди, сразу, не дожидаясь, пока кто-то ответит
+    r = attack(bt, uu["id"], 260 + i)
+    assert r.status_code == 200, (i, r.text)
+    ids.append(r.json()["id"])
+assert all(len(pending(c)) == 1 for c, _ in bv)
+assert len(bt.get("/api/minigames/petun/state").json()["my_attacks"]) == 3     # три неразгаданные одновременно
+chat = chat_texts(third)
+for _, uu in bv:
+    assert any(uu["username"].upper() in x and "ТЕБЯ ПЕТУНЯТ ПРЯМО СЕЙЧАС!!!!!" in x for x in chat), uu["username"]
+assert attack(bt, bv[0][1]["id"], 270).status_code == 409                       # одного и того же, пока он выбирает, нельзя
 
+# все три жертвы угадали (блокировок нет), «прошло 5 минут»: теперь воровство жетонов по очереди, каждому не больше 30 % его баланса
+for i, (c, uu) in enumerate(bv):
+    assert guess(c, pending(c)[0]["id"], btu["id"], 240 + i).json()["caught"] is True
+for c, _ in bv:
+    bal(c)                                                    # счёт жетонов создаётся при первом обращении
+alter("UPDATE petun_attacks SET created_ts=created_ts-400")
+alter("UPDATE slot_accounts SET balance=100 WHERE user_id=?", (bv[1][1]["id"],))   # у второй жертвы 100: максимум 30
+alter("UPDATE slot_accounts SET balance=2 WHERE user_id=?", (bv[2][1]["id"],))     # у третьей почти ничего: красть нечего, но отпетунить можно
+assert steal(bt, bv[0][1]["id"], 280, 500).status_code == 400                      # больше 30 % нельзя
+for i, amount in enumerate((300, 30, 0)):
+    assert steal(bt, bv[i][1]["id"], 281 + i, amount).status_code == 200, i
+assert bal(bv[0][0]) == 700 and bal(bv[1][0]) == 70 and bal(bv[2][0]) == 2
+st = bt.get("/api/minigames/petun/state").json()
+assert st["frozen"] == 330 and bal(bt) == 1000 and len(st["my_attacks"]) == 3
+# первая жертва не угадала: добыча вору; вторая угадала: возврат и штраф 10 %
+p0, p1 = pending(bv[0][0])[0], pending(bv[1][0])[0]
+wrong = next(c["id"] for c in p0["candidates"] if c["id"] != btu["id"])
+assert guess(bv[0][0], p0["id"], wrong, 250).json()["caught"] is False
+assert bal(bt) == 1300
+g = guess(bv[1][0], p1["id"], btu["id"], 251)
+assert g.json()["caught"] is True and g.json()["compensation"] == 3, g.text
+assert bal(bv[1][0]) == 70 + 30 + 3 and bal(bt) == 1300 - 3, (bal(bv[1][0]), bal(bt))
 
-my = cthief.get("/api/minigames/petun/state").json()["my_attack"]
-assert my and cvictim.get("/api/minigames/petun/status").json()["pending_count"] == 1
-assert cancel(cvictim, my["id"]).status_code == 404 and cancel(outsider, my["id"]).status_code == 404   # отменить может только нападающий
-assert httpx.post(BASE + "/api/minigames/petun/cancel", json={"attack_id": my["id"]}).status_code == 401
-r = cancel(cthief, my["id"])
-assert r.status_code == 200 and r.json()["ok"], r.text
-st = cthief.get("/api/minigames/petun/state").json()
-assert st["has_active"] is False and st["my_attack"] is None
-assert cvictim.get("/api/minigames/petun/status").json()["pending_count"] == 0
-assert guess(cvictim, my["id"], ct["id"], 220).status_code == 409                    # отменённое отгадывать нельзя
-assert cancel(cthief, my["id"]).status_code == 409                                    # повторная отмена
-r = steal(cthief, cv["id"], 221, 0)
-assert r.status_code == 429, "отмена не обходит «раз в 5 минут»: нельзя спамить «атака — отмена»"
-
-# отмена возвращает замороженные жетоны жертве
-free_victim()
-alter("UPDATE slot_accounts SET balance=1000 WHERE user_id=?", (cv["id"],))
-thief_before = bal(cthief)
-r = steal(cthief, cv["id"], 222, 100)
-assert r.status_code == 200 and bal(cvictim) == 900, r.text
-r = cancel(cthief, r.json()["id"])
-assert r.status_code == 200 and r.json()["returned"] == 100, r.text
-assert bal(cvictim) == 1000 and bal(cthief) == thief_before, (bal(cvictim), bal(cthief))
-assert cthief.get("/api/minigames/petun/state").json()["frozen"] == 0
-
-for c in (cthief, cvictim, cother):
+for c in (cthief, cvictim, cother, bt, *[c for c, _ in bv]):
     c.close()
 for c in (thief, victim, other, third, outsider):
     c.close()
