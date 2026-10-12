@@ -22,7 +22,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.concurrency import run_in_threadpool
 
-from . import auth, minigames, social
+from . import auth, chat, minigames, social
 from .db import db
 
 router = APIRouter(prefix="/api/minigames/petun", tags=["Мини-игры · Отпетунивание"])
@@ -131,10 +131,22 @@ def _finish(row: dict, outcome: str, now: int, guessed_id=None, guess_req=None, 
     """Внутри db.tx. caught — жертва угадала; escaped — не угадала или не ответила (тогда она «отпетунена»)."""
     if row["status"] != "pending":
         return
-    if outcome == "escaped" and db.one("SELECT 1 AS x FROM users WHERE id=?", (row["victim_id"],)):
+    thief = db.one("SELECT id,username,display_name FROM users WHERE id=?", (row["thief_id"],))
+    victim = db.one("SELECT id,username,display_name FROM users WHERE id=?", (row["victim_id"],))
+    if outcome == "escaped" and victim:
         _punish(row["victim_id"], row["id"], now, serve_now=victim_online)
     db.x("""UPDATE petun_attacks SET status=?,guessed_id=?,guess_request_id=?,resolved_ts=?
             WHERE id=? AND status='pending'""", (outcome, guessed_id, guess_req, now, row["id"]))
+    # Объявление в общем чате (как у «Клубничного вора»): запись и очередь Telegram — в той же транзакции.
+    if outcome == "caught" and thief and victim:
+        text = (f"{minigames._announcement_name(thief, row['thief_username'])} СЛОВИЛ КРЕМПАЙ ОТ "
+                f"{minigames._announcement_name(victim, row['victim_username'])}!!!!")
+    elif outcome == "escaped" and victim:
+        text = f"{minigames._announcement_name(victim, row['victim_username'])} ОТПЕТУНИН ПО ПОЛНОЙ!!!!!"
+    else:
+        text = None
+    if text:
+        chat.post_system(text, f"petun:{row['id']}", kind="strawberry")
 
 
 def expire_attacks(now: int | None = None) -> int:
@@ -228,6 +240,9 @@ def attack(thief_id: int, victim_id: int, request_id: str) -> dict:
                       VALUES(?,?,?,?,?,?,?,?)""",
                    (thief_id, victim_id, thief["username"], victim["username"], json.dumps(candidates, ensure_ascii=False),
                     request_id, now, now + ANSWER_SECONDS))
+        # Объявляем только жертву: вор не раскрывается, пока друг не ответит.
+        chat.post_system(f"{minigames._announcement_name(victim, victim['username'])}, ТЕБЯ ПЕТУНЯТ ПРЯМО СЕЙЧАС!!!!!",
+                         f"petun-start:{aid}", kind="strawberry")
         return {"id": aid, "replayed": False, "victim": victim["username"]}
 
 

@@ -47,6 +47,10 @@ def guess(client, aid, suspect, n):
     return client.post("/api/minigames/petun/guess", json={"attack_id": aid, "suspect_id": suspect, "request_id": rid(n)})
 
 
+def chat_texts(client):
+    return [m["text"] for m in client.get("/api/chat/messages").json()["messages"] if m.get("system_kind") == "strawberry"]
+
+
 def pending(client):
     return client.get("/api/minigames/petun/state").json()["pending"]
 
@@ -77,6 +81,8 @@ aid = r.json()["id"]
 assert attack(thief, v["id"], 10).json()["replayed"] is True
 assert attack(thief, o["id"], 10).status_code == 409                  # тот же request_id для другой цели
 assert victim.get("/api/minigames/petun/status").json() == {"pending_count": 1, "latest_pending_id": aid}
+start = [x for x in chat_texts(third) if "ТЕБЯ ПЕТУНЯТ ПРЯМО СЕЙЧАС!!!!!" in x]
+assert start and v["username"].upper() in start[-1] and t["username"].upper() not in start[-1], start   # в чате — только жертва
 p = pending(victim)[0]
 assert p["id"] == aid and {c["id"] for c in p["candidates"]} == {t["id"], o["id"], x["id"]}
 assert "thief_id" not in p and "thief_username" not in p
@@ -95,6 +101,7 @@ assert g.status_code == 200, g.text
 j = g.json()
 assert j["caught"] is False and j["lock"] and 55 <= j["lock"]["seconds_left"] <= 60, j
 assert guess(victim, aid, t["id"], 23).status_code == 423               # попытка одна, а отпетуненному игры недоступны (минуту — только курсы)
+assert any(x == f"{v['username'].upper()} ОТПЕТУНИН ПО ПОЛНОЙ!!!!!" for x in chat_texts(third)), chat_texts(third)
 me = victim.get("/api/me")
 assert me.status_code == 200 and me.json()["petun"]["seconds_left"] > 50
 assert victim.get("/api/courses").status_code == 200
@@ -129,6 +136,7 @@ g = guess(other, aid_o, t["id"], 35)
 assert g.status_code == 200 and g.json()["caught"] is True and g.json()["lock"] is None, g.text
 assert other.get("/api/slots/state").status_code == 200 and other.get("/api/me").json()["petun"] is None
 assert thief.get("/api/minigames/petun/state").json()["recent"][0]["caught"] is True
+assert f"{t['username'].upper()} СЛОВИЛ КРЕМПАЙ ОТ {o['username'].upper()}!!!!" in chat_texts(third), chat_texts(third)
 
 # --- прошло полчаса: отпетунить того же игрока снова можно
 alter("UPDATE petun_attacks SET created_ts=created_ts-1900 WHERE victim_id=?", (v["id"],))
@@ -147,6 +155,7 @@ lock = other.get("/api/me").json()["petun"]                                     
 assert lock and 55 <= lock["seconds_left"] <= 60, lock
 assert other.get("/api/slots/state").status_code == 423
 assert other.get("/api/me").json()["petun"]["until"] == lock["until"], "повторное открытие не продлевает минуту"
+assert chat_texts(third).count(f"{o['username'].upper()} ОТПЕТУНИН ПО ПОЛНОЙ!!!!!") == 1, "таймаут тоже объявляется в чате"
 assert guess(other, aid_o2, t["id"], 39).status_code == 423                          # отпетуненному игры недоступны, а отвечать уже поздно
 
 for c in (thief, victim, other, third, outsider):
