@@ -248,3 +248,89 @@ def import_all(data: dict, replace: bool = False) -> dict:
     removed = dedupe_templates()  # на случай, если в файле дубликаты уже имеющихся курсов под другими номерами
     added = [n for n in added if n not in removed]
     return {"added": added, "skipped": skipped, "replaced": replaced, "duplicates_removed": removed}
+
+
+# ----------------------------------------------------------------------- дополнение готового курса новым материалом
+# Пакет «дополнения» (готовится заранее, например scripts/author_supplement.py) содержит новые модули с готовыми уроками и текст нового файла.
+# Применение добавляет их В КОНЕЦ курса-шаблона и всех уже существующих копий (origin_id = шаблон): модули и уроки, которые у людей уже есть,
+# не трогаются, поэтому прогресс, ответы и XP сохраняются. Повторное применение того же пакета ничего не меняет.
+def export_supplement(course_id: int, *, module_from: int, chunk_base: int, source_ids: list[int], title: str = "") -> dict:
+    """Собрать пакет из рабочего курса: модули с номером >= module_from, их уроки, фрагменты текста с номером > chunk_base и новые файлы."""
+    c = db.one("SELECT * FROM courses WHERE id=?", (course_id,))
+    marks = ",".join(str(int(i)) for i in source_ids) or "0"
+    sources = db.q(f"SELECT id, filename, chars, text FROM sources WHERE course_id=? AND id IN ({marks}) ORDER BY id", (course_id,))
+    mods = db.q("""SELECT id, idx, title, summary, objectives, chunk_ids, practical, plan, kind FROM modules
+                   WHERE course_id=? AND idx>=? AND kind<>'review' ORDER BY idx""", (course_id, module_from))
+    mrel = {m["id"]: i for i, m in enumerate(mods)}
+    lessons = []
+    for m in mods:
+        for l in db.q("SELECT id, idx, type, title, minutes, content, meta FROM lessons WHERE module_id=? ORDER BY idx", (m["id"],)):
+            if not l.get("content"):
+                raise ValueError(f"урок «{l['title']}» без содержимого: пакет не готов")
+            lessons.append({"id": l["id"], "module_rel": mrel[m["id"]], "idx": l["idx"], "type": l["type"], "title": l["title"],
+                            "minutes": l["minutes"], "content": l["content"], "meta": l["meta"]})
+    return {"version": 1, "kind": "supplement", "title": title or "Дополнение курса", "has_practice": int(c["has_practice"] or 0),
+            "chunk_base": chunk_base,
+            "sources": [{"filename": s["filename"], "chars": s["chars"], "text": s["text"]} for s in sources],
+            "chunks": db.q("SELECT idx, text, digest FROM chunks WHERE course_id=? AND idx>? ORDER BY idx", (course_id, chunk_base)),
+            "modules": [{k: m[k] for k in ("title", "summary", "objectives", "chunk_ids", "practical", "plan", "kind")} for m in mods],
+            "lessons": lessons}
+
+
+def _supplement_marker(pkg: dict) -> tuple[str, int]:
+    s = (pkg.get("sources") or [{}])[0]
+    return s.get("filename", ""), int(s.get("chars") or 0)
+
+
+def _apply_supplement_to(course_id: int, pkg: dict) -> str:
+    """Добавить пакет в один курс. Возвращает 'added' или 'skipped' (если этот файл у курса уже есть)."""
+    fname, chars = _supplement_marker(pkg)
+    with db.tx():
+        if fname and db.one("SELECT 1 AS x FROM sources WHERE course_id=? AND filename=? AND chars=?", (course_id, fname, chars)):
+            return "skipped"
+        shift = (db.val("SELECT MAX(idx) FROM chunks WHERE course_id=?", (course_id,), 0) or 0) - int(pkg.get("chunk_base") or 0)
+        sid = 0
+        for s in pkg.get("sources", []):
+            sid = db.x("INSERT INTO sources(course_id,filename,chars,text) VALUES(?,?,?,?)", (course_id, s["filename"], s["chars"], s["text"]))
+        for ch in pkg.get("chunks", []):
+            db.x("INSERT INTO chunks(course_id,source_id,idx,text,digest) VALUES(?,?,?,?,?)", (course_id, sid, ch["idx"] + shift, ch["text"], ch.get("digest")))
+        base = db.val("SELECT MAX(idx) FROM modules WHERE course_id=?", (course_id,), None)
+        base = -1 if base is None else base
+        mmap = {}
+        for i, m in enumerate(pkg["modules"]):
+            plan = jl(m.get("plan"), None)
+            status = "planned" if isinstance(plan, dict) and plan.get("terms") else "new"
+            chunk_ids = [int(x) + shift for x in (jl(m.get("chunk_ids"), []) or [])]
+            mmap[i] = db.x("""INSERT INTO modules(course_id,idx,title,summary,objectives,chunk_ids,practical,status,plan,kind)
+                              VALUES(?,?,?,?,?,?,?,?,?,'main')""",
+                           (course_id, base + 1 + i, m["title"], m["summary"], m["objectives"], jd(chunk_ids), int(m.get("practical") or 0), status, jd(plan) if plan else None))
+        lmap, rows = {}, []
+        for l in pkg["lessons"]:
+            meta = jl(l.get("meta"), {}) or {}
+            lid = db.x("INSERT INTO lessons(course_id,module_id,idx,type,title,minutes,status,content,meta) VALUES(?,?,?,?,?,?,'ready',?,?)",
+                       (course_id, mmap[l["module_rel"]], l["idx"], l["type"], l["title"], l["minutes"], l["content"], jd(meta)))
+            lmap[l["id"]] = lid
+            rows.append((lid, meta))
+        for lid, meta in rows:  # парные тесты ссылаются на урок-родитель
+            if "for" in meta:
+                meta["for"] = lmap.get(meta["for"], meta["for"])
+                db.x("UPDATE lessons SET meta=? WHERE id=?", (jd(meta), lid))
+        c = db.one("SELECT status, has_practice FROM courses WHERE id=?", (course_id,))
+        if pkg.get("has_practice") and not c["has_practice"]:
+            db.x("UPDATE courses SET has_practice=1, practice_kind='problems' WHERE id=?", (course_id,))
+        if c["status"] == "completed":  # появились новые уроки: курс снова «в процессе»
+            db.x("UPDATE courses SET status='ready' WHERE id=?", (course_id,))
+    return "added"
+
+
+def apply_supplement(number: int, pkg: dict) -> dict:
+    """Применить дополнение к курсу каталога №number и ко всем копиям, которые добавили пользователи. Прогресс не затрагивается."""
+    if pkg.get("kind") != "supplement" or not pkg.get("modules") or not pkg.get("lessons"):
+        raise ValueError("Это не файл дополнения курса")
+    t = find(number)
+    if not t:
+        raise KeyError("catalog")
+    out = {"template": _apply_supplement_to(t["id"], pkg), "copies_added": 0, "copies_skipped": 0}
+    for c in db.q("SELECT id FROM courses WHERE origin_id=? AND is_template=0 ORDER BY id", (t["id"],)):
+        out["copies_added" if _apply_supplement_to(c["id"], pkg) == "added" else "copies_skipped"] += 1
+    return out

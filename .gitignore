@@ -18,3 +18,5 @@ catalog_seed.json
 catalog_authoring/
 задачи.md
 slots/
+
+catalog_supplement_*.json

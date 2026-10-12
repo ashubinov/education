@@ -544,6 +544,23 @@ async def catalog_import(request: Request, file: UploadFile = File(...), replace
     return await run_in_threadpool(catalog.import_all, data, bool(replace))
 
 
+@app.post("/api/admin/catalog/{number}/supplement")
+async def catalog_supplement(number: int, request: Request, file: UploadFile = File(...)):
+    """Администратор: добавить в конец курса каталога №number новые модули из файла-дополнения; они же появятся у всех, кто уже добавил курс
+    себе (прогресс не затрагивается). Повторная загрузка того же файла ничего не меняет."""
+    admin(request)
+    try:
+        pkg = json.loads((await file.read()).decode("utf-8"))
+    except Exception:
+        raise HTTPException(400, "Это не JSON-файл дополнения")
+    try:
+        return {"number": number, **await run_in_threadpool(catalog.apply_supplement, number, pkg)}
+    except KeyError:
+        raise HTTPException(404, f"В каталоге нет курса №{number}")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
 # =============================================================== уроки и запуски
 def _own_lesson(user: dict, lesson_id: int) -> dict:
     l = db.one("SELECT l.* FROM lessons l JOIN courses c ON c.id=l.course_id WHERE l.id=? AND c.user_id=?", (lesson_id, user["id"]))
