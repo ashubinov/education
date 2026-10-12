@@ -10,7 +10,9 @@
 Ограничения (как у вора, плюс «раз в 5 минут»):
 • у одного игрока не больше одной неразгаданной атаки (и «нападающий», и «жертва»), пока друг не ответит, следующего не отпетунить;
 • одного и того же игрока можно отпетунить не чаще, чем раз в VICTIM_COOLDOWN секунд (кем бы ни был нападающий);
-• отпетуненного (идёт блокировка) отпетунить нельзя.
+• отпетуненного (идёт блокировка) отпетунить нельзя;
+• нападающий может отменить свою неразгаданную атаку (если друг не отвечает): замороженные жетоны возвращаются жертве, а «раз в 5 минут»
+  для этого игрока при этом продолжает действовать (чтобы нельзя было спамить «атака — отмена»).
 
 Блокировка действует на сервере: пока она активна, `auth.require_user` пропускает только курсы, занятия, профиль (GET /api/me) и выход.
 """
@@ -44,6 +46,10 @@ class AttackIn(Strict):
     victim_id: int = Field(ge=1)
     amount: int = Field(default=0, ge=0, le=9_000_000_000_000_000, strict=True)   # 0 — просто отпетунить, без воровства жетонов
     request_id: str = Field(pattern=r"^[A-Za-z0-9_-]{16,64}$")
+
+
+class CancelIn(Strict):
+    attack_id: int = Field(ge=1)
 
 
 class GuessIn(Strict):
@@ -209,7 +215,7 @@ def status(uid: int) -> dict:
 
 def _wait_for(victim_id: int, now: int) -> int:
     """Через сколько секунд этого игрока снова можно отпетунить (0 — можно)."""
-    last = db.val("SELECT MAX(created_ts) FROM petun_attacks WHERE victim_id=? AND status<>'cancelled'", (victim_id,))
+    last = db.val("SELECT MAX(created_ts) FROM petun_attacks WHERE victim_id=?", (victim_id,))
     return max(0, VICTIM_COOLDOWN - (now - int(last))) if last is not None else 0
 
 
@@ -313,6 +319,21 @@ def guess(victim_id: int, attack_id: int, suspect_id: int, request_id: str) -> d
         return _view(row, False, _lock_now(victim_id, now))
 
 
+def cancel(thief_id: int, attack_id: int) -> dict:
+    """Нападающий отменяет свою неразгаданную атаку: без блокировки жертве и без объявления в чате; замороженное возвращается жертве."""
+    with db.tx():
+        row = db.one("SELECT * FROM petun_attacks WHERE id=? AND thief_id=?", (attack_id, thief_id))
+        if not row:
+            raise HTTPException(404, "Отпетунивание не найдено")
+        if row["status"] != "pending":
+            raise HTTPException(409, "Это отпетунивание уже завершено")
+        now = int(time.time())
+        if row["amount"] and db.one("SELECT 1 AS x FROM users WHERE id=?", (row["victim_id"],)):
+            minigames._credit(row["victim_id"], row["amount"])
+        db.x("UPDATE petun_attacks SET status='cancelled',resolved_ts=? WHERE id=? AND status='pending'", (now, attack_id))
+    return {"ok": True, "attack_id": attack_id, "returned": row["amount"]}
+
+
 def _lock_now(uid: int, now: int) -> dict | None:
     row = db.one("SELECT * FROM petun_locks WHERE user_id=? AND state='active' AND until_ts>?", (uid, now))
     return _lock_view(row, now) if row else None
@@ -342,6 +363,11 @@ async def get_state(request: Request):
 @router.post("/attack")
 async def post_attack(request: Request, body: AttackIn):
     return await run_in_threadpool(attack, _user(request)["id"], body.victim_id, body.request_id, body.amount)
+
+
+@router.post("/cancel")
+async def post_cancel(request: Request, body: CancelIn):
+    return await run_in_threadpool(cancel, _user(request)["id"], body.attack_id)
 
 
 @router.post("/guess")

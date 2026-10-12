@@ -249,6 +249,36 @@ r = steal(cthief, cv["id"], 210, 1)
 assert r.status_code == 400 and "недостаточно" in r.json()["detail"], r.text
 assert steal(cthief, cv["id"], 211, 0).status_code == 200
 
+# =============================== отмена своей неразгаданной атаки ===============================
+def cancel(client, attack_id):
+    return client.post("/api/minigames/petun/cancel", json={"attack_id": attack_id})
+
+
+my = cthief.get("/api/minigames/petun/state").json()["my_attack"]
+assert my and cvictim.get("/api/minigames/petun/status").json()["pending_count"] == 1
+assert cancel(cvictim, my["id"]).status_code == 404 and cancel(outsider, my["id"]).status_code == 404   # отменить может только нападающий
+assert httpx.post(BASE + "/api/minigames/petun/cancel", json={"attack_id": my["id"]}).status_code == 401
+r = cancel(cthief, my["id"])
+assert r.status_code == 200 and r.json()["ok"], r.text
+st = cthief.get("/api/minigames/petun/state").json()
+assert st["has_active"] is False and st["my_attack"] is None
+assert cvictim.get("/api/minigames/petun/status").json()["pending_count"] == 0
+assert guess(cvictim, my["id"], ct["id"], 220).status_code == 409                    # отменённое отгадывать нельзя
+assert cancel(cthief, my["id"]).status_code == 409                                    # повторная отмена
+r = steal(cthief, cv["id"], 221, 0)
+assert r.status_code == 429, "отмена не обходит «раз в 5 минут»: нельзя спамить «атака — отмена»"
+
+# отмена возвращает замороженные жетоны жертве
+free_victim()
+alter("UPDATE slot_accounts SET balance=1000 WHERE user_id=?", (cv["id"],))
+thief_before = bal(cthief)
+r = steal(cthief, cv["id"], 222, 100)
+assert r.status_code == 200 and bal(cvictim) == 900, r.text
+r = cancel(cthief, r.json()["id"])
+assert r.status_code == 200 and r.json()["returned"] == 100, r.text
+assert bal(cvictim) == 1000 and bal(cthief) == thief_before, (bal(cvictim), bal(cthief))
+assert cthief.get("/api/minigames/petun/state").json()["frozen"] == 0
+
 for c in (cthief, cvictim, cother):
     c.close()
 for c in (thief, victim, other, third, outsider):
