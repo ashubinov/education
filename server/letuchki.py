@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import re
+import time
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel, ConfigDict, Field
@@ -33,6 +34,7 @@ DEFAULT_SUBJECT = "Операционные системы"
 XP_CORRECT, XP_PARTIAL = 15, 7      # опыт за вопрос, только за первое прорешивание
 OK_SCORE, PARTIAL_SCORE = 0.55, 0.22
 MAX_ANSWER = 6000
+PASS_COOLDOWN = 30   # один и тот же вариант засчитывается в достижения не чаще, чем раз в 30 секунд
 
 
 def init_schema():
@@ -67,6 +69,10 @@ def init_schema():
             PRIMARY KEY(user_id, set_id)
         );
         """)
+        cols = {r[1] for r in db.conn.execute("PRAGMA table_info(lt_results)")}
+        for col in ("passed", "last_pass_ts"):   # засчитанные прохождения (для достижений) и время последнего засчитанного
+            if col not in cols:
+                db.conn.execute(f"ALTER TABLE lt_results ADD COLUMN {col} INTEGER NOT NULL DEFAULT 0")
         db.conn.commit()
 
 
@@ -202,20 +208,27 @@ def check(user_id: int, set_id: int, answers: list[str]) -> dict:
         v = verdict_of(sc)
         items.append({"verdict": v, "score": round(sc, 2), "reference": q["answer"]})
     overall = overall_of([i["verdict"] for i in items])
+    now = int(time.time())
     with db.tx():
         row = db.one("SELECT * FROM lt_results WHERE user_id=? AND set_id=?", (user_id, set_id))
         first = row is None
+        # засчитанное прохождение (идёт в достижения, повторные тоже): не «неверно» и не чаще раза в PASS_COOLDOWN секунд на вариант
+        counted = overall != "fail" and (first or now - (row["last_pass_ts"] or 0) >= PASS_COOLDOWN)
         if first:
             xp = sum(XP_CORRECT if i["verdict"] == "correct" else XP_PARTIAL if i["verdict"] == "partial" else 0 for i in items)
-            db.x("INSERT INTO lt_results(user_id,set_id,attempts,first_overall,best_overall,xp,last_ts) VALUES(?,?,1,?,?,?,strftime('%s','now'))",
-                 (user_id, set_id, overall, overall, xp))
+            db.x("INSERT INTO lt_results(user_id,set_id,attempts,first_overall,best_overall,xp,last_ts,passed,last_pass_ts) VALUES(?,?,1,?,?,?,?,?,?)",
+                 (user_id, set_id, overall, overall, xp, now, int(counted), now if counted else 0))
             gm.record_activity(user_id, 0, xp=xp, answers=len(items), correct=sum(i["score"] if i["verdict"] != "wrong" else 0 for i in items))
         else:
             best = overall if _RANK[overall] > _RANK.get(row["best_overall"], 0) else row["best_overall"]
-            db.x("UPDATE lt_results SET attempts=attempts+1, best_overall=?, last_ts=strftime('%s','now') WHERE user_id=? AND set_id=?", (best, user_id, set_id))
+            db.x("UPDATE lt_results SET attempts=attempts+1, best_overall=?, last_ts=?, passed=passed+?, last_pass_ts=? WHERE user_id=? AND set_id=?",
+                 (best, now, int(counted), now if counted else row["last_pass_ts"], user_id, set_id))
+        passed_total = db.val("SELECT SUM(passed) FROM lt_results WHERE user_id=?", (user_id,), 0) or 0
+    new_ach = gm.check_achievements(user_id) if counted else []
     nxt = next_set(set_id)
     return {"overall": overall, "items": items, "first": first, "xp": xp, "next": nxt, "subject_id": s["subject_id"],
-            "attempts": (row["attempts"] if row else 0) + 1}
+            "attempts": (row["attempts"] if row else 0) + 1, "counted": counted, "passed_total": passed_total, "achievements": new_ach,
+            "next_goal": next((n for n, *_ in gm.LT_STEPS if n > passed_total), None)}
 
 
 def next_set(set_id: int) -> dict | None:

@@ -552,6 +552,24 @@ async def catalog_import(request: Request, file: UploadFile = File(...), replace
     return await run_in_threadpool(catalog.import_all, data, bool(replace))
 
 
+@app.post("/api/achievements/claim")
+async def claim_all_rewards(request: Request):
+    u = auth.require_user(request)
+    try:
+        return await run_in_threadpool(gm.claim_rewards, u["id"], None)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/achievements/{key}/claim")
+async def claim_reward(key: str, request: Request):
+    u = auth.require_user(request)
+    try:
+        return await run_in_threadpool(gm.claim_rewards, u["id"], key)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
 @app.post("/api/admin/catalog/{number}/supplement")
 async def catalog_supplement(number: int, request: Request, file: UploadFile = File(...)):
     """Администратор: добавить в конец курса каталога №number новые модули из файла-дополнения; они же появятся у всех, кто уже добавил курс

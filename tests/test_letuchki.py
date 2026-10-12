@@ -4,10 +4,14 @@
 запрет загрузки для обычного пользователя, список предметов/тем/вариантов без закрытых, проверку ответов (верно / частично / неверно),
 итог для анимации (ok / partial / fail), опыт только за первое прорешивание и «следующий» вариант.
 """
+import os
 import sys
 import time
 
 import httpx
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from server.db import db  # noqa: E402
 
 BASE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8011"
 TAG = str(time.time_ns() % 10**11)
@@ -134,6 +138,7 @@ print("OK: первое прорешивание частично верно →
 good2 = "Схема: два прямоугольника и три стрелки. Слева очередь задач, справа процессор. Новая задача встаёт в очередь, первая задача выбирается из очереди на процессор, когда процессор освободится."
 r = user.post(f"/api/letuchki/sets/{set1}/check", json={"answers": [good1, good2]}).json()
 assert r["overall"] == "ok" and not r["first"] and r["xp"] == 0 and r["attempts"] == 2, r
+assert not r["counted"] and r["passed_total"] == 1, "повтор раньше чем через 30 секунд в достижения не идёт"
 assert user.get("/api/me").json()["level"]["xp"] == 15
 s = user.get(f"/api/letuchki/sets/{set1}").json()
 assert s["best"] == "ok" and s["attempts"] == 2 and s["xp"] == 15, s
@@ -150,7 +155,44 @@ done = [s for s in user.get("/api/letuchki/subjects").json() if s["id"] == sid][
 assert done == 2, done
 print("OK: неверные ответы → fail, ошибки ввода и доступ")
 
+# 6b) достижения за прохождения: повторы считаются (не чаще раза в 30 секунд на вариант), «неверно» не считается;
+#     за достижение можно забрать жетоны один раз
+me = user.get("/api/me").json()["id"]
+assert user.post("/api/achievements/lt_5/claim").status_code == 400          # ещё не получено
+assert user.post("/api/achievements/first_lesson/claim").status_code == 400  # у этого достижения нет награды
+assert user.post("/api/achievements/claim").status_code == 400               # забирать пока нечего
+new_total = None
+for i in range(4):
+    db.x("UPDATE lt_results SET last_pass_ts=0 WHERE user_id=?", (me,))
+    r = user.post(f"/api/letuchki/sets/{set1}/check", json={"answers": [good1, good2]}).json()
+    assert r["counted"], r
+    new_total = r["passed_total"]
+assert new_total == 5 and [a["key"] for a in r["achievements"]] == ["lt_5"], r
+assert r["next_goal"] == 10
+ach = {a["key"]: a for a in user.get("/api/stats").json()["achievements"]}
+assert ach["lt_5"]["claimable"] and ach["lt_5"]["reward"] == 20 and not ach["lt_5"]["claimed"] and not ach["lt_10"]["claimable"]
+assert ach["lt_500"]["reward"] == 2000
+bal0 = db.val("SELECT balance FROM slot_accounts WHERE user_id=?", (me,), None)
+c = user.post("/api/achievements/lt_5/claim").json()
+assert c["chips"] == 20 and c["claimed"] == ["lt_5"], c
+bal1 = db.val("SELECT balance FROM slot_accounts WHERE user_id=?", (me,), None)
+assert bal1 == c["balance"] and (bal0 is None or bal1 == bal0 + 20) and bal1 >= 20, (bal0, bal1)
+assert user.post("/api/achievements/lt_5/claim").status_code == 400, "награда выдаётся один раз"
+assert user.post("/api/achievements/claim").status_code == 400
+assert db.val("SELECT balance FROM slot_accounts WHERE user_id=?", (me,)) == bal1
+print("OK: прохождения (с повторами) идут в достижения, жетоны за достижение забираются один раз")
+
+# 6c) «забрать все»: накручиваем счётчик напрямую и проверяем выдачу сразу нескольких наград
+db.x("UPDATE lt_results SET passed=passed+45 WHERE user_id=? AND set_id=?", (me, set1))
+db.x("UPDATE lt_results SET last_pass_ts=0 WHERE user_id=?", (me,))
+r = user.post(f"/api/letuchki/sets/{set1}/check", json={"answers": [good1, good2]}).json()
+assert {a["key"] for a in r["achievements"]} == {"lt_10", "lt_20", "lt_30", "lt_50"}, r["achievements"]
+c = user.post("/api/achievements/claim").json()
+assert c["chips"] == 40 + 80 + 120 + 200 and sorted(c["claimed"]) == ["lt_10", "lt_20", "lt_30", "lt_50"], c
+assert user.post("/api/achievements/claim").status_code == 400
+print("OK: «забрать все» выдаёт все доступные награды один раз")
+
 # 7) обновление эталона не теряет результаты учеников
 upload(admin, MD)
-assert user.get(f"/api/letuchki/sets/{set1}").json()["attempts"] == 2
+assert user.get(f"/api/letuchki/sets/{set1}").json()["attempts"] == 7  # 2 + 4 + 1 из проверок выше
 print("ALL OK")
