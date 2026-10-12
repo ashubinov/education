@@ -1,6 +1,6 @@
 """ОТПЕТУНИВАНИЕ (API, сквозной): запускается через tests/run_ci.py на одноразовой базе LQ_DB.
 
-Проверяет: выбор друга, одна неразгаданная атака у нападающего и у жертвы, «раз в полчаса» на каждого игрока, анонимность до ответа,
+Проверяет: выбор друга, одна неразгаданная атака у нападающего и у жертвы, «раз в 5 минут» на каждого игрока, анонимность до ответа,
 угадал → ничего, не угадал → минута блокировки (на сервере доступны только курсы, профиль и выход), таймаут → блокировка при следующем входе,
 идемпотентность и доступ.
 """
@@ -72,7 +72,7 @@ assert attack(thief, t["id"], 2).status_code == 400               # сам се�
 assert thief.post("/api/minigames/petun/attack", json={"victim_id": v["id"], "request_id": "short"}).status_code == 422
 st = thief.get("/api/minigames/petun/state").json()
 assert {f["id"] for f in st["friends"]} == {v["id"], o["id"]} and all(f["wait"] == 0 and not f["busy"] for f in st["friends"])
-assert st["lock_seconds"] == 60 and st["cooldown_seconds"] == 1800
+assert st["lock_seconds"] == 60 and st["cooldown_seconds"] == 300
 
 # --- атака: жертва видит только список подозреваемых
 r = attack(thief, v["id"], 10)
@@ -120,12 +120,12 @@ alter("UPDATE petun_locks SET until_ts=? WHERE user_id=?", (int(time.time()) - 1
 assert victim.get("/api/slots/state").status_code == 200
 assert victim.get("/api/me").json()["petun"] is None
 
-# --- «раз в полчаса» на каждого игрока, кем бы ни был нападающий
+# --- «раз в 5 минут» на каждого игрока, кем бы ни был нападающий
 r = attack(thief, v["id"], 31); assert r.status_code == 429 and "мин." in r.json()["detail"], r.text
 r = attack(third, v["id"], 32); assert r.status_code == 429, r.text
 st = thief.get("/api/minigames/petun/state").json()
 fv = next(f for f in st["friends"] if f["id"] == v["id"])
-assert 0 < fv["wait"] <= 1800 and not st["has_active"]
+assert 0 < fv["wait"] <= 300 and not st["has_active"]
 assert [(a["caught"]) for a in st["recent"]] == [False]
 # другого игрока отпетунить можно сразу (ограничение — на жертву, а не на нападающего)
 r = attack(thief, o["id"], 33); assert r.status_code == 200, r.text
@@ -138,14 +138,14 @@ assert other.get("/api/slots/state").status_code == 200 and other.get("/api/me")
 assert thief.get("/api/minigames/petun/state").json()["recent"][0]["caught"] is True
 assert f"{t['username'].upper()} СЛОВИЛ КРЕМПАЙ ОТ {o['username'].upper()}!!!!" in chat_texts(third), chat_texts(third)
 
-# --- прошло полчаса: отпетунить того же игрока снова можно
-alter("UPDATE petun_attacks SET created_ts=created_ts-1900 WHERE victim_id=?", (v["id"],))
+# --- прошло 5 минут: отпетунить того же игрока снова можно
+alter("UPDATE petun_attacks SET created_ts=created_ts-400 WHERE victim_id=?", (v["id"],))
 r = attack(third, v["id"], 36); assert r.status_code == 200, r.text
 aid_v2 = r.json()["id"]
 assert guess(victim, aid_v2, x["id"], 37).json()["caught"] is True
 
 # --- не ответил за час: «не угадал», блокировка начинается, когда жертва откроет сайт
-alter("UPDATE petun_attacks SET created_ts=created_ts-1900 WHERE victim_id=?", (o["id"],))
+alter("UPDATE petun_attacks SET created_ts=created_ts-400 WHERE victim_id=?", (o["id"],))
 r = attack(thief, o["id"], 38); assert r.status_code == 200, r.text
 aid_o2 = r.json()["id"]
 alter("UPDATE petun_attacks SET expires_ts=? WHERE id=?", (int(time.time()) - 1, aid_o2))
@@ -160,4 +160,4 @@ assert guess(other, aid_o2, t["id"], 39).status_code == 423                     
 
 for c in (thief, victim, other, third, outsider):
     c.close()
-print("OK: отпетунивание — друг, одна атака, раз в полчаса, угадал/не угадал/не ответил, блокировка только на курсы, идемпотентность")
+print("OK: отпетунивание — друг, одна атака, раз в 5 минут, угадал/не угадал/не ответил, блокировка только на курсы, идемпотентность")
