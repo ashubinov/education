@@ -17,7 +17,7 @@ from . import gamification as gm
 from . import chat
 from . import chat_commands
 from . import chat_telegram_relay
-from . import arena, arena_pvp, farm, lab, minigames, pet, petun, pixels, planner
+from . import arena, arena_pvp, farm, lab, letuchki, minigames, pet, petun, pixels, planner
 from . import slots_meme
 from .db import db, jd, jl
 from .llm import llm
@@ -37,6 +37,7 @@ async def lifespan(app: FastAPI):
     arena.init_schema()
     arena_pvp.init_schema()
     petun.init_schema()
+    letuchki.init_schema()
     farm.init_schema()
     lab.init_schema()
     slots_meme.init_schema()
@@ -62,6 +63,12 @@ async def lifespan(app: FastAPI):
             print("Каталог загружен из catalog_seed.json:", res)
         except Exception as e:
             print("Не удалось загрузить catalog_seed.json:", e)
+    lt_seed = config.DATA / "letuchki_seed.md"  # летучки: если их ещё нет и рядом лежит letuchki_seed.md — загружаем (как catalog_seed.json)
+    if lt_seed.exists() and not db.val("SELECT COUNT(*) FROM lt_subjects", default=0):
+        try:
+            print("Летучки загружены из letuchki_seed.md:", letuchki.import_md(lt_seed.read_text(encoding="utf-8-sig")))
+        except Exception as e:
+            print("Не удалось загрузить letuchki_seed.md:", e)
     tgbot.start()
     notifier.start()
     backup.start()
@@ -106,6 +113,7 @@ app.include_router(pet.router)
 app.include_router(arena.router)
 app.include_router(arena_pvp.router)
 app.include_router(petun.router)
+app.include_router(letuchki.router)
 app.include_router(farm.router)
 app.include_router(lab.router)
 app.include_router(slots_meme.router)
