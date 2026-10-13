@@ -17,8 +17,10 @@ from . import gamification as gm
 from . import chat
 from . import chat_commands
 from . import chat_telegram_relay
-from . import arena, arena_pvp, farm, lab, minigames, pet, pixels, planner
+from . import arena, arena_pvp, farm, lab, letuchki, minigames, pet, petun, pixels, planner
 from . import slots_meme
+from . import clans
+from . import themes
 from .db import db, jd, jl
 from .llm import llm
 from .schemas import THEME_DEFAULT, AnswerIn, BanIn, FriendRequestIn, GoalIn, LoginIn, MeUpdate, PasswordChangeIn, PublishIn, RegisterIn, SettingsUpdate, SignatureIn, SlotBuyIn, SlotSpinIn, StartIn, UsernameChangeIn
@@ -36,10 +38,14 @@ async def lifespan(app: FastAPI):
     pet.init_schema()
     arena.init_schema()
     arena_pvp.init_schema()
+    petun.init_schema()
+    letuchki.init_schema()
     farm.init_schema()
     lab.init_schema()
     slots_meme.init_schema()
+    clans.init_schema()
     planner.init_schema()
+    themes.init_schema()
     generator.set_loop(asyncio.get_running_loop())
     arena_pvp.set_loop(asyncio.get_running_loop())
     catalog.system_user_id()
@@ -61,18 +67,30 @@ async def lifespan(app: FastAPI):
             print("Каталог загружен из catalog_seed.json:", res)
         except Exception as e:
             print("Не удалось загрузить catalog_seed.json:", e)
+    lt_seed = config.DATA / "letuchki_seed.md"  # летучки: если их ещё нет и рядом лежит letuchki_seed.md — загружаем (как catalog_seed.json)
+    if lt_seed.exists() and not db.val("SELECT COUNT(*) FROM lt_subjects", default=0):
+        try:
+            print("Летучки загружены из letuchki_seed.md:", letuchki.import_md(lt_seed.read_text(encoding="utf-8-sig")))
+        except Exception as e:
+            print("Не удалось загрузить letuchki_seed.md:", e)
     tgbot.start()
     notifier.start()
     backup.start()
     strawberry_task = asyncio.create_task(minigames.expiry_loop())
     relay_task = asyncio.create_task(chat_telegram_relay.worker_loop())
     pvp_task = asyncio.create_task(arena_pvp.expiry_loop())
+    petun_task = asyncio.create_task(petun.expiry_loop())
     try:
         yield
     finally:
         relay_task.cancel()
         try:
             await relay_task
+        except asyncio.CancelledError:
+            pass
+        petun_task.cancel()
+        try:
+            await petun_task
         except asyncio.CancelledError:
             pass
         pvp_task.cancel()
@@ -98,10 +116,14 @@ app.include_router(pixels.router)
 app.include_router(pet.router)
 app.include_router(arena.router)
 app.include_router(arena_pvp.router)
+app.include_router(petun.router)
+app.include_router(letuchki.router)
 app.include_router(farm.router)
 app.include_router(lab.router)
+app.include_router(clans.router)
 app.include_router(slots_meme.router)
 app.include_router(planner.router)
+app.include_router(themes.router)
 
 # ---------- CORS: фронт на GitHub Pages ходит на этот бэкенд с другого домена; авторизация — Bearer-токеном, куки не нужны ----------
 _local = [f"http://127.0.0.1:{config.PORT}", f"http://localhost:{config.PORT}"]
@@ -166,10 +188,10 @@ def user_public(u: dict) -> dict:
     xp = gm.total_xp(u["id"])
     out = {
         "id": u["id"], "username": u["username"], "display_name": u["display_name"] or u["username"], "avatar": u["avatar"],
-        "avatar_url": avatars.url(u["id"]), "theme_color": u["theme_color"], "theme_mode": u["theme_mode"], "theme_extra": {**THEME_DEFAULT, **(jl(u.get("theme_extra"), {}) or {})}, "sound": bool(u["sound"]),
+        "avatar_url": avatars.url(u["id"]), "theme_color": u["theme_color"], "theme_mode": u["theme_mode"], "theme_extra": {**THEME_DEFAULT, **(jl(u.get("theme_extra"), {}) or {})}, "theme_custom": themes.active(u), "sound": bool(u["sound"]),
         "reminders_on": bool(u["reminders_on"]), "reminder_time": u["reminder_time"], "is_admin": bool(u["is_admin"]),
         "must_change_password": bool(u.get("must_change")),
-        "telegram": bool(u["tg_chat_id"]), "level": gm.level_info(xp), "streak": gm.streak_info(u["id"]),
+        "telegram": bool(u["tg_chat_id"]), "level": gm.level_info(xp), "streak": gm.streak_info(u["id"]), "clan": clans.of_user(u["id"]),
     }
     if u["is_admin"]:
         out["moderation_pending"] = social.pending_count()
@@ -242,7 +264,10 @@ async def avatar_image(key: str):
 
 @app.get("/api/me")
 async def get_me(request: Request):
-    return user_public(me(request))
+    u = me(request)
+    out = user_public(u)
+    out["petun"] = await run_in_threadpool(petun.lock_status, u["id"])  # минута «ОТПЕТУНИН» (None — нет блокировки); взведённая запускается здесь
+    return out
 
 
 @app.put("/api/me")
@@ -253,6 +278,9 @@ async def update_me(request: Request, body: MeUpdate):
         if k in fields:
             fields[k] = int(fields[k])
     if "theme_extra" in fields:
+        cid = fields["theme_extra"].get("custom")
+        if cid is not None and not themes.owns(u["id"], cid):
+            raise HTTPException(400, "Такой темы нет")
         fields["theme_extra"] = jd(fields["theme_extra"])
     if fields:
         sets = ", ".join(f"{k}=?" for k in fields)
@@ -531,6 +559,41 @@ async def catalog_import(request: Request, file: UploadFile = File(...), replace
     except Exception:
         raise HTTPException(400, "Это не JSON-файл каталога")
     return await run_in_threadpool(catalog.import_all, data, bool(replace))
+
+
+@app.post("/api/achievements/claim")
+async def claim_all_rewards(request: Request):
+    u = auth.require_user(request)
+    try:
+        return await run_in_threadpool(gm.claim_rewards, u["id"], None)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/achievements/{key}/claim")
+async def claim_reward(key: str, request: Request):
+    u = auth.require_user(request)
+    try:
+        return await run_in_threadpool(gm.claim_rewards, u["id"], key)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/admin/catalog/{number}/supplement")
+async def catalog_supplement(number: int, request: Request, file: UploadFile = File(...)):
+    """Администратор: добавить в конец курса каталога №number новые модули из файла-дополнения; они же появятся у всех, кто уже добавил курс
+    себе (прогресс не затрагивается). Повторная загрузка того же файла ничего не меняет."""
+    admin(request)
+    try:
+        pkg = json.loads((await file.read()).decode("utf-8"))
+    except Exception:
+        raise HTTPException(400, "Это не JSON-файл дополнения")
+    try:
+        return {"number": number, **await run_in_threadpool(catalog.apply_supplement, number, pkg)}
+    except KeyError:
+        raise HTTPException(404, f"В каталоге нет курса №{number}")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 # =============================================================== уроки и запуски

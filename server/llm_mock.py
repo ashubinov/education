@@ -49,6 +49,30 @@ def _svg(label_a: str, label_b: str) -> str:
             f"<text x='315' y='125' font-size='15' text-anchor='middle' fill='#222'>{label_b}</text></svg>")
 
 
+def _hsl_hex(h: float, s: float, l: float) -> str:
+    a = s * min(l, 1 - l)
+
+    def f(n):
+        k = (n + h / 30) % 12
+        return l - a * max(-1, min(k - 3, 9 - k, 1))
+    return "#" + "".join(f"{round(f(n) * 255):02x}" for n in (0, 8, 4))
+
+
+def _mock_theme(ctx: dict) -> dict:
+    """Демо-тема по описанию: оттенок берётся из текста, светлая или тёмная — по ключевым словам."""
+    p = str(ctx.get("prompt", "")).lower()
+    rng = random.Random(f"{p}|{ctx.get('seed', 0)}")
+    hue = rng.randrange(360)
+    light = bool(re.search(r"светл|день|пастел|бумаг|утр|весн|снег|мят|молок", p))
+    sat = 0.25 + rng.random() * 0.25
+    bg_l = 0.94 if light else 0.08
+    return {"name": (p[:24].strip().capitalize() or "Демо-тема"), "mode": "light" if light else "dark",
+            "colors": {"bg": _hsl_hex(hue, sat, bg_l), "card": _hsl_hex(hue, sat, bg_l + (0.04 if light else 0.05)),
+                       "ink": _hsl_hex(hue, 0.15, 0.1 if light else 0.94), "accent": _hsl_hex((hue + 160) % 360, 0.85, 0.5 if light else 0.62),
+                       "ok": _hsl_hex(135, 0.6, 0.38 if light else 0.6), "bad": _hsl_hex(355, 0.75, 0.48 if light else 0.64)},
+            "logo": "🎨", "decor": ["✨", "🌙"] if not light else ["🌸", "🍃"]}
+
+
 def respond(task: str, ctx: dict) -> dict:
     rng = random.Random(len(str(ctx)))
     if task == "digest":
@@ -161,6 +185,9 @@ def respond(task: str, ctx: dict) -> dict:
         sc = 1.0 if len(ans) > 60 else 0.5 if len(ans) > 15 else 0.0
         return {"score": sc, "verdict": "correct" if sc >= 0.85 else "partial" if sc else "wrong",
                 "feedback": "Демо-проверка: засчитано по объёму ответа.", "missing": [] if sc == 1 else ["Раскрой ответ подробнее"], "concepts": []}
+
+    if task == "theme":
+        return _mock_theme(ctx)
 
     if task == "adapt":
         return {"notes": "Ученик осваивает материал в обычном темпе (демо).", "review": None, "message": "Модуль пройден — так держать!"}

@@ -1,7 +1,7 @@
-"""Мемный автомат LearnQuest: отдельная частота выигрышей и таблица выплат.
+"""Мемный автомат LearnQuest: те же барабаны, линии, шансы и таблица выплат, что у собачьего («Лапа удачи»).
 
-Отдельная история, но ОБЩИЙ расходуемый баланс slot_accounts и статистика
-всех вращений. Сервер вычисляет всё сам; видео не влияет на выплаты.
+Отличаются только картинки/названия символов и отдельная история вращений. Баланс slot_accounts и статистика
+всех вращений ОБЩИЕ. Сервер вычисляет всё сам (через slots.play); видео не влияет на выплаты.
 """
 from __future__ import annotations
 
@@ -18,12 +18,7 @@ from .db import db
 
 router = APIRouter(prefix="/api/slots/meme", tags=["Мемные слоты"])
 
-# Базовые линии/частоты — как у старого автомата. Но MEME SLOTS 
-# имеет УВЕЛИЧЕННУЮ вероятность прибыльной комбинации.
-# Снижение коэффициентов обычных выплат компенсирует более частые выигрыши:
-# это важно при общем балансе с другими мини-играми.
-BASE_PAY_NUM, BASE_PAY_DEN = 3, 4
-BOOST_CHANCE = 0.25  # шанс получить небольшой выигрыш, когда обычная комбинация не окупилась
+# Шансы и выплаты полностью совпадают с собачьим автоматом: никаких коэффициентов, подкруток и «добавочных» выигрышей.
 # Игровые идентификаторы намеренно отличаются от собачьих.
 REMAP = {
     "doberman": "rage", "bulldog": "hype", "pug": "shocked",
@@ -78,59 +73,9 @@ def init_schema() -> None:
 
 
 
-def _scale(prize: int) -> int:
-    """Детерминированное округление денежных выплат (3/4, half-up)."""
-    return (prize * BASE_PAY_NUM + BASE_PAY_DEN // 2) // BASE_PAY_DEN
-
-
-def _meme_details(details, bet: int):
-    """Масштабировать все составляющие, пересчитать выигрыш и tier.
-
-    Нельзя масштабировать только итог: тогда история линий и итог не совпадут.
-    """
-    ev = dict(details)
-    ev["lines"] = [{**line, "pay": _scale(line["pay"])} for line in details["lines"]]
-    if details.get("scatter"):
-        ev["scatter"] = {**details["scatter"], "pay": _scale(details["scatter"]["pay"])}
-    if details.get("bonus"):
-        ev["bonus"] = {**details["bonus"], "prize": _scale(details["bonus"]["prize"])}
-    total = sum(line["pay"] for line in ev["lines"])
-    total += (ev["scatter"]["pay"] if ev.get("scatter") else 0)
-    total += (ev["bonus"]["prize"] if ev.get("bonus") else 0)
-    ev["payout"] = total
-    ev["tier"] = slots.tier_of(total, bet)
-    return ev
-
-
-def _boosted_roll(bet: int):
-    """Небольшой честно рассчитанный выигрыш по одной линии.
-
-    Создаём валидную сетку: выплата САМОСТОЯТЕЛЬНО вычисляется slots.evaluate.
-    Сервер выбирает один из двух низкооплачиваемых символов.
-    """
-    grid = [
-        ["ball", "collar", "bowl"],
-        ["ball", "collar", "bone"],
-        ["bowl", "collar", "ball"],
-        ["bone", "ball", "bowl"],
-        ["ball", "bone", "collar"],
-    ]
-    sym = slots._rng.choice(("bone", "collar"))
-    for i in range(3):
-        grid[i][1] = sym
-    ev = _meme_details(slots.evaluate(grid, bet), bet)
-    # Защита от случайной порчи шаблона при изменении общих линий слотов.
-    if not bet < ev["payout"] <= 2 * bet:
-        raise RuntimeError("Изменилась таблица линий: требуется обновить бонусный шаблон MEME SLOTS")
-    return grid, ev
-
-
-def play_meme(bet: int):
-    grid, original = slots.play(bet)
-    ev = _meme_details(original, bet)
-    if ev["payout"] <= bet and slots._rng.random() < BOOST_CHANCE:
-        return _boosted_roll(bet)
-    return grid, ev
+def play_meme(bet: int, rng=None):
+    """Тот же розыгрыш, что и у собачьего автомата (slots.play): барабанные ленты, 10 линий, выплаты и бонус одинаковые."""
+    return slots.play(bet, rng)
 
 
 def _map_grid(grid):
@@ -174,8 +119,7 @@ def _stats(user_id):
 
 def _meta():
     base = slots.meta()
-    return {**base, "machine_id": "meme", "payout_scale": BASE_PAY_NUM / BASE_PAY_DEN,
-            "boost_chance": BOOST_CHANCE, "symbols": [
+    return {**base, "machine_id": "meme", "symbols": [
         {**s, "id": REMAP[s["id"]], "name": NAMES[REMAP[s["id"]]]}
         for s in base["symbols"]
     ]}

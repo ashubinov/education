@@ -29,6 +29,14 @@ ACHIEVEMENTS = [
     ("comeback", "💪", "Не сдался", "Контрольный тест сдан после работы над ошибками"),
     ("sosun", "🍼", "Сосун", "Честно ответил «ДА» на главный вопрос"),
 ]
+# Летучки: достижения за число засчитанных прохождений (повторные тоже считаются). За каждое можно забрать жетоны слотов.
+LT_STEPS = [  # (прохождений, иконка, название, жетонов в награду)
+    (5, "🛫", "Взлёт", 20), (10, "🚁", "Стажёр-оператор", 40), (20, "📝", "Летучий отряд", 80), (30, "🛰️", "Разведчик", 120),
+    (50, "🦅", "Ас летучек", 200), (75, "💥", "Подрывник", 300), (100, "🏅", "Сотка", 450), (150, "🚀", "Эскадрилья", 650),
+    (250, "🛡️", "Командир эскадры", 1000), (350, "🌌", "Повелитель дронов", 1400), (500, "👑", "Легенда летучек", 2000),
+]
+ACHIEVEMENTS += [(f"lt_{n}", icon, title, f"Засчитано прохождений летучек: {n}") for n, icon, title, _ in LT_STEPS]
+REWARDS = {f"lt_{n}": chips for n, _, _, chips in LT_STEPS}   # ключ достижения → жетоны, которые можно забрать
 HIDDEN = {"sosun"}  # скрытые достижения: в списке видны, только когда получены
 ACH_BY_KEY = {a[0]: a for a in ACHIEVEMENTS}
 
@@ -215,7 +223,11 @@ def _stats_for_ach(user_id: int) -> dict:
     has_goal = db.val("SELECT COUNT(*) FROM courses WHERE user_id=? AND goal_date IS NOT NULL", (user_id,), 0)
     u = db.one("SELECT tg_chat_id FROM users WHERE id=?", (user_id,)) or {}
     h = datetime.now().hour
-    return {"xp": xp, "lessons": lessons, "streak": max(s["current"], s["best"]), "perfect": perfect,
+    try:
+        lt_passed = db.val("SELECT SUM(passed) FROM lt_results WHERE user_id=?", (user_id,), 0) or 0
+    except Exception:  # таблицы летучек ещё нет (скрипты без запуска сервера)
+        lt_passed = 0
+    return {"lt_passed": lt_passed, "xp": xp, "lessons": lessons, "streak": max(s["current"], s["best"]), "perfect": perfect,
             "terms_ok": terms_ok, "practice_ok": practice_ok, "modules_done": modules_done,
             "courses_done": courses_done, "has_goal": has_goal, "tg": bool(u.get("tg_chat_id")),
             "level": level_info(xp)["level"], "hour": h}
@@ -242,6 +254,9 @@ def _earned(st: dict, extra: set[str]) -> set[str]:
     if st["level"] >= 10: e.add("level_10")
     if st["has_goal"]: e.add("goal_set")
     if st["tg"]: e.add("tg_linked")
+    for n, *_ in LT_STEPS:
+        if st["lt_passed"] >= n:
+            e.add(f"lt_{n}")
     return e
 
 
@@ -265,9 +280,37 @@ def check_achievements(user_id: int, extra: set[str] | None = None) -> list[dict
 
 
 def achievements_list(user_id: int) -> list[dict]:
-    got = {r["key"]: r["unlocked_at"] for r in db.q("SELECT key, unlocked_at FROM achievements WHERE user_id=?", (user_id,))}
-    return [{"key": a[0], "icon": a[1], "title": a[2], "desc": a[3], "unlocked": a[0] in got,
-             "at": got.get(a[0])} for a in ACHIEVEMENTS if a[0] not in HIDDEN or a[0] in got]
+    rows = db.q("SELECT key, unlocked_at, claimed_at FROM achievements WHERE user_id=?", (user_id,))
+    got = {r["key"]: r["unlocked_at"] for r in rows}
+    claimed = {r["key"] for r in rows if r["claimed_at"]}
+    return [{"key": a[0], "icon": a[1], "title": a[2], "desc": a[3], "unlocked": a[0] in got, "at": got.get(a[0]),
+             "reward": REWARDS.get(a[0], 0), "claimed": a[0] in claimed, "claimable": a[0] in got and a[0] in REWARDS and a[0] not in claimed}
+            for a in ACHIEVEMENTS if a[0] not in HIDDEN or a[0] in got]
+
+
+def claim_rewards(user_id: int, key: str | None = None) -> dict:
+    """Забрать жетоны за достижения: одно (key) или все доступные. Каждая награда выдаётся один раз (всё в одной транзакции)."""
+    from . import slots  # слоты импортируют этот модуль, поэтому импорт внутри функции
+    slots.ensure_account(user_id)
+    with db.tx():
+        mine = {r["key"] for r in db.q("SELECT key FROM achievements WHERE user_id=? AND claimed_at IS NULL", (user_id,))}
+        if key is not None:
+            if key not in REWARDS:
+                raise ValueError("За это достижение нет награды")
+            if key not in mine:
+                has = db.one("SELECT 1 AS x FROM achievements WHERE user_id=? AND key=?", (user_id, key))
+                raise ValueError("Награда уже получена" if has else "Достижение ещё не получено")
+            keys = [key]
+        else:
+            keys = sorted(k for k in mine if k in REWARDS)
+        if not keys:
+            raise ValueError("Нет наград, которые можно забрать")
+        total = sum(REWARDS[k] for k in keys)
+        for k in keys:
+            db.x("UPDATE achievements SET claimed_at=CURRENT_TIMESTAMP WHERE user_id=? AND key=?", (user_id, k))
+        db.x("UPDATE slot_accounts SET balance=balance+?, updated_at=CURRENT_TIMESTAMP WHERE user_id=?", (total, user_id))
+        balance = db.val("SELECT balance FROM slot_accounts WHERE user_id=?", (user_id,), 0)
+    return {"claimed": keys, "chips": total, "balance": balance}
 
 
 def user_summary(user_id: int) -> dict:

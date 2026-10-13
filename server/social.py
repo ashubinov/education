@@ -7,7 +7,7 @@ import re
 
 from fastapi import HTTPException
 
-from . import auth, avatars
+from . import auth, avatars, clans
 from . import gamification as gm
 from .db import db
 
@@ -31,7 +31,8 @@ def last_active(uid: int) -> str | None:
 
 def pub(u: dict) -> dict:
     """Что о пользователе можно показывать другим."""
-    return {"id": u["id"], "username": u["username"], "display_name": u["display_name"] or u["username"], "avatar": u["avatar"], "avatar_url": avatars.url(u["id"])}
+    return {"id": u["id"], "username": u["username"], "display_name": u["display_name"] or u["username"], "avatar": u["avatar"], "avatar_url": avatars.url(u["id"]),
+            "clan": clans.of_user(u["id"])}
 
 
 def brief(u: dict) -> dict:
@@ -246,7 +247,7 @@ def unban(uid: int):
 
 def delete_user(admin_id: int, uid: int):
     """Удалить пользователя навсегда: аккаунт, курсы с уроками и прогрессом, друзей, подписи, аватарку."""
-    from . import catalog, slots, minigames, pixels, pet, farm, lab, arena, arena_pvp, planner  # здесь, чтобы не создавать цикл импорта
+    from . import catalog, slots, minigames, petun, pixels, pet, farm, lab, arena, arena_pvp, planner, themes  # здесь, чтобы не создавать цикл импорта
     u = db.one("SELECT * FROM users WHERE id=?", (uid,))
     if not u or u["username"] == auth.SYSTEM_USERNAME:
         raise HTTPException(404, "Пользователь не найден")
@@ -258,13 +259,16 @@ def delete_user(admin_id: int, uid: int):
         catalog.delete_course(c["id"])
     minigames.on_user_delete(uid)  # вернуть/выдать замороженные жетоны перед удалением
     arena_pvp.delete_user_data(uid)  # settle PvP escrow before wallet removal
+    petun.on_user_delete(uid)
     slots.delete_user_slot_data(uid)
     pixels.delete_user_data(uid)
     pet.delete_user_data(uid)
     farm.delete_user_data(uid)
     lab.delete_user_data(uid)
     arena.delete_user_data(uid)
+    clans.delete_user_data(uid)
     planner.delete_user_data(uid)
+    themes.delete_user_data(uid)
     with db.tx():
         for sql in ("DELETE FROM runs WHERE user_id=?", "DELETE FROM answers WHERE user_id=?", "DELETE FROM activity WHERE user_id=?",
                     "DELETE FROM achievements WHERE user_id=?", "DELETE FROM sessions WHERE user_id=?", "DELETE FROM avatars WHERE user_id=?",
