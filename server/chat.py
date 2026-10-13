@@ -77,7 +77,8 @@ def _identity(request: Request) -> dict:
 
 
 _SELECT = """SELECT m.id, m.user_id, m.text, m.created_at, m.system_kind, m.gif_key,
-                  u.display_name, u.username, u.avatar
+                  u.display_name, u.username, u.avatar,
+                  (SELECT c.tag FROM clan_members cm JOIN clans c ON c.id=cm.clan_id WHERE cm.user_id=m.user_id) AS clan_tag
              FROM chat_messages m JOIN users u ON u.id=m.user_id
              WHERE COALESCE(u.banned,0)=0"""  # сообщения заблокированных пользователей в чате не показываются
 
@@ -89,6 +90,7 @@ def _public(r: dict) -> dict:
         "avatar": r["avatar"] or "👤",
         "avatar_url": avatars.url(r["user_id"]),
         "text": r["text"], "created_at": r["created_at"], "system_kind": r["system_kind"],
+        "clan_tag": r.get("clan_tag"),
         "gif_url": chat_gifs.url(r.get("gif_key")),
     }
 
