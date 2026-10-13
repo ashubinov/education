@@ -165,6 +165,29 @@ msgs = other.get("/api/chat/messages").json()["messages"]
 assert all(m.get("system_kind") is not None for m in msgs
            if "СЛОВИЛ КРЕМПАЙ" in m["text"] or "ОТКЛУБНИЧЕН ПО ПОЛНОЙ" in m["text"] or "КЛУБНИЧАТ" in m["text"])
 
+# =============================== несколько жертв у одного вора ===============================
+st_thief, stt = reg("allthief")
+vics = [reg(f"allvic{i}") for i in range(2)]
+for c, uu in vics:
+    friends(st_thief, stt, c, uu)
+friends(vics[0][0], vics[0][1], vics[1][0], vics[1][1])                       # у жертв есть ещё друг: кого выбирать при догадке
+first = post_steal(st_thief, vics[0][1]["id"], "strawberry-multi-0001", 100)
+assert first.status_code == 200, first.text
+# пока первый друг не ответил, можно красть у другого (пауза между кражами — 60 секунд, как раньше; здесь её обходим)
+alter("UPDATE strawberry_thefts SET created_ts=created_ts-100 WHERE thief_id=?", (stt["id"],))
+second = post_steal(st_thief, vics[1][1]["id"], "strawberry-multi-0002", 50)
+assert second.status_code == 200, second.text
+assert st_thief.get("/api/minigames/strawberry/state").json()["frozen"] == 150      # у вора две неразгаданные кражи одновременно
+p0 = vics[0][0].get("/api/minigames/strawberry/state").json()["pending"][0]
+p1 = vics[1][0].get("/api/minigames/strawberry/state").json()["pending"][0]
+wrong = next(c["id"] for c in p0["candidates"] if c["id"] != stt["id"])
+g = post_guess(vics[0][0], p0["id"], wrong, "guess-multi-wrong-0001")
+assert g.status_code == 200 and not g.json()["caught"] and balance(st_thief) == 1100
+g = post_guess(vics[1][0], p1["id"], stt["id"], "guess-multi-right-0001")
+assert g.json()["caught"] and g.json()["compensation"] == 5 and balance(vics[1][0]) == 950 + 50 + 5 and balance(st_thief) == 1095
+for c in (st_thief, *[c for c, _ in vics]):
+    c.close()
+
 for c in (thief, victim, other, outsider):
     c.close()
 print("OK: клубничный вор — сумма до 30%, штраф 10% за поимку (не больше баланса вора), 24 часа, идемпотентность, анонимность до ответа")

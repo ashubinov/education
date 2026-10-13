@@ -8,11 +8,12 @@ from __future__ import annotations
 import time
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
-from . import auth, avatars, config
+from . import auth, avatars, chat_gifs, config
 from .db import db
 
 router = APIRouter(prefix="/api/chat", tags=["Общий чат"])
@@ -66,6 +67,7 @@ def init_schema() -> None:
         columns = {r[1] for r in db.conn.execute("PRAGMA table_info(chat_messages)")}
         if "system_kind" not in columns:
             db.conn.execute("ALTER TABLE chat_messages ADD COLUMN system_kind TEXT")
+    chat_gifs.init_schema()
 
 
 def _identity(request: Request) -> dict:
@@ -74,7 +76,7 @@ def _identity(request: Request) -> dict:
     return auth.require_user(request)
 
 
-_SELECT = """SELECT m.id, m.user_id, m.text, m.created_at, m.system_kind,
+_SELECT = """SELECT m.id, m.user_id, m.text, m.created_at, m.system_kind, m.gif_key,
                   u.display_name, u.username, u.avatar,
                   (SELECT c.tag FROM clan_members cm JOIN clans c ON c.id=cm.clan_id WHERE cm.user_id=m.user_id) AS clan_tag
              FROM chat_messages m JOIN users u ON u.id=m.user_id
@@ -89,6 +91,7 @@ def _public(r: dict) -> dict:
         "avatar_url": avatars.url(r["user_id"]),
         "text": r["text"], "created_at": r["created_at"], "system_kind": r["system_kind"],
         "clan_tag": r.get("clan_tag"),
+        "gif_url": chat_gifs.url(r.get("gif_key")),
     }
 
 
@@ -172,13 +175,68 @@ async def chat_send(request: Request, body: MessageIn):
     return await run_in_threadpool(send, user["id"], body.text, body.request_id)
 
 
+def send_gif(user_id: int, data: bytes, caption: str, request_id: str) -> dict:
+    """Отправить GIF (с необязательной подписью) в общий чат. Лимиты сообщений — те же, что у текста, плюс свои лимиты на гифки."""
+    caption = (caption or "").strip()
+    if len(caption) > chat_gifs.CAPTION_MAX:
+        raise HTTPException(422, f"Подпись к гифке — не больше {chat_gifs.CAPTION_MAX} символов")
+    if any(ord(ch) < 32 and ch not in "\n\t" for ch in caption):
+        raise HTTPException(422, "Недопустимые управляющие символы")
+    gif = chat_gifs.clean(data)
+    now = int(time.time())
+    with db.tx():
+        user = db.one("SELECT id,banned FROM users WHERE id=?", (user_id,))
+        if not user or user["banned"]:
+            raise HTTPException(403, "Аккаунт недоступен")
+        old = db.one("SELECT id FROM chat_messages WHERE user_id=? AND request_id=?", (user_id, request_id))
+        if old:
+            row = db.one(_SELECT + " AND m.id=?", (old["id"],))
+            return {**_public(row), "replayed": True}
+        recent = db.one("SELECT MAX(created_ts) AS last, COUNT(*) AS count FROM chat_messages WHERE user_id=? AND created_ts>=?", (user_id, now - 60))
+        if recent["last"] is not None and now - recent["last"] < MIN_GAP_SECONDS:
+            raise HTTPException(429, "Между сообщениями должно пройти 2 секунды")
+        if recent["count"] >= PER_MINUTE_LIMIT:
+            raise HTTPException(429, "Не больше 15 сообщений за минуту")
+        chat_gifs.check_limits(user_id, len(gif), now)
+        key = chat_gifs.store(user_id, gif, now)
+        stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        mid = db.x("INSERT INTO chat_messages(user_id,request_id,text,created_ts,created_at,gif_key) VALUES(?,?,?,?,?,?)",
+                   (user_id, request_id, caption, now, stamp, key))
+        db.x("INSERT INTO chat_events(message_id,kind,created_ts) VALUES(?,'sent',?)", (mid, now))
+        row = db.one(_SELECT + " AND m.id=?", (mid,))
+    chat_gifs.cleanup(now)
+    return {**_public(row), "replayed": False}
+
+
+@router.post("/gif")
+async def chat_send_gif(request: Request, file: UploadFile = File(...), request_id: str = Form(..., pattern=r"^[A-Za-z0-9_-]{16,64}$"),
+                        caption: str = Form("")):
+    user = _identity(request)
+    data = await file.read(chat_gifs.MAX_BYTES + 1)
+    return await run_in_threadpool(send_gif, user["id"], data, caption, request_id)
+
+
+@router.get("/gifs/{key}")
+async def chat_gif_image(key: str):
+    """Сама картинка отдаётся без входа (<img> не шлёт Authorization), но адрес с длинным случайным ключом угадать нельзя."""
+    data = await run_in_threadpool(chat_gifs.get, key[:80])
+    if data is None:
+        raise HTTPException(404, "Картинка не найдена")
+    return Response(data, media_type="image/gif", headers={
+        "Cache-Control": "public, max-age=31536000, immutable", "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "default-src 'none'; sandbox", "Content-Disposition": "inline"})
+
+
 def delete_message(message_id: int) -> dict:
     """Удаление сообщения администратором: пропадает из истории, а открытые окна чата получают событие «deleted»."""
     now = int(time.time())
     with db.tx():
         if not db.one("SELECT id FROM chat_messages WHERE id=?", (message_id,)):
             raise HTTPException(404, "Сообщение не найдено")
+        gif = db.val("SELECT gif_key FROM chat_messages WHERE id=?", (message_id,))
         db.x("DELETE FROM chat_messages WHERE id=?", (message_id,))
+        if gif:
+            db.x("DELETE FROM chat_gifs WHERE key=?", (gif,))
         db.x("UPDATE chat_command_uses SET message_id=NULL WHERE message_id=?", (message_id,))
         db.x("INSERT INTO chat_events(message_id,kind,created_ts) VALUES(?,'deleted',?)", (message_id, now))
     return {"ok": True, "id": message_id}

@@ -130,6 +130,8 @@ def get_state(user_id: int) -> dict:
 
 # ----------------------------------------------------------------------------- бой
 def fight(user_id: int, opponent_id: int | None, npc: str | None, bet: int) -> dict:
+    if opponent_id is not None:
+        raise HTTPException(400, "Бои с игроками доступны только в Live PvP — /pet/pvp")
     if (opponent_id is None) == (npc is None):
         raise HTTPException(400, "Выбери одного соперника")
     if bet not in BETS:
