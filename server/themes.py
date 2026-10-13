@@ -1,4 +1,4 @@
-"""Свои темы оформления: игрок собирает тему из 6 цветов (или просит ИИ придумать её по описанию) и хранит до MAX_THEMES штук.
+"""Свои темы оформления: игрок собирает тему из 6 цветов (или просит ИИ придумать её по описанию) и хранит до MAX_THEMES (6) штук.
 
 Как это устроено:
 - тема = название, 6 цветов (фон, карточки, текст, главный, «верно», «ошибка»), эмодзи-значок и до 8 эмодзи для падающего фона;
@@ -23,7 +23,7 @@ from .llm import LLMError, LLMUnavailable, llm
 
 router = APIRouter(prefix="/api/themes", tags=["Темы"])
 
-MAX_THEMES = 12
+MAX_THEMES = 6
 GEN_PER_HOUR, GEN_PER_DAY = 8, 30
 NAME_MAX, DECOR_MAX, EMOJI_MAX_LEN = 30, 8, 8
 COLOR_KEYS = ("bg", "card", "ink", "accent", "ok", "bad")
