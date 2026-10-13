@@ -195,9 +195,9 @@ async def expiry_loop():
 
 
 def _pending_for(uid: int) -> list[dict]:
-    rows = db.q("SELECT id,amount,created_ts,expires_ts,candidates_json FROM petun_attacks WHERE victim_id=? AND status='pending' ORDER BY id DESC", (uid,))
+    rows = db.q("SELECT id,thief_id,amount,created_ts,expires_ts,candidates_json FROM petun_attacks WHERE victim_id=? AND status='pending' ORDER BY id DESC", (uid,))
     return [{"id": r["id"], "amount": r["amount"], "created_ts": r["created_ts"], "expires_ts": r["expires_ts"],
-             "candidates": json.loads(r["candidates_json"])} for r in rows]
+             "candidates": minigames._candidate_presentation(uid, r["thief_id"], json.loads(r["candidates_json"]))} for r in rows]
 
 
 def status(uid: int) -> dict:
@@ -305,7 +305,7 @@ def guess(victim_id: int, attack_id: int, suspect_id: int, request_id: str) -> d
         ids = {u["id"] for u in json.loads(row["candidates_json"])}
         if suspect_id not in ids:
             raise HTTPException(422, "Выбери подозреваемого из списка")
-        outcome = "caught" if suspect_id == row["thief_id"] else "escaped"
+        outcome = minigames._outcome_for(row, suspect_id)
         _finish(row, outcome, now, suspect_id, request_id, victim_online=True)
         row = db.one("SELECT * FROM petun_attacks WHERE id=?", (attack_id,))
         return _view(row, False, _lock_now(victim_id, now))
