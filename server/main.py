@@ -19,6 +19,7 @@ from . import chat_commands
 from . import chat_telegram_relay
 from . import arena, arena_pvp, farm, lab, letuchki, minigames, pet, petun, pixels, planner
 from . import slots_meme
+from . import clans
 from . import themes
 from .db import db, jd, jl
 from .llm import llm
@@ -42,6 +43,7 @@ async def lifespan(app: FastAPI):
     farm.init_schema()
     lab.init_schema()
     slots_meme.init_schema()
+    clans.init_schema()
     planner.init_schema()
     themes.init_schema()
     generator.set_loop(asyncio.get_running_loop())
@@ -118,6 +120,7 @@ app.include_router(petun.router)
 app.include_router(letuchki.router)
 app.include_router(farm.router)
 app.include_router(lab.router)
+app.include_router(clans.router)
 app.include_router(slots_meme.router)
 app.include_router(planner.router)
 app.include_router(themes.router)
@@ -188,7 +191,7 @@ def user_public(u: dict) -> dict:
         "avatar_url": avatars.url(u["id"]), "theme_color": u["theme_color"], "theme_mode": u["theme_mode"], "theme_extra": {**THEME_DEFAULT, **(jl(u.get("theme_extra"), {}) or {})}, "theme_custom": themes.active(u), "sound": bool(u["sound"]),
         "reminders_on": bool(u["reminders_on"]), "reminder_time": u["reminder_time"], "is_admin": bool(u["is_admin"]),
         "must_change_password": bool(u.get("must_change")),
-        "telegram": bool(u["tg_chat_id"]), "level": gm.level_info(xp), "streak": gm.streak_info(u["id"]),
+        "telegram": bool(u["tg_chat_id"]), "level": gm.level_info(xp), "streak": gm.streak_info(u["id"]), "clan": clans.of_user(u["id"]),
     }
     if u["is_admin"]:
         out["moderation_pending"] = social.pending_count()

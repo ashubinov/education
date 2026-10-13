@@ -2,11 +2,24 @@
 Запуск: python tests/test_slots_meme.py http://127.0.0.1:8011
 Требует запущенный тестовый сервер и доступ к регистрации.
 """
+import os
+import pathlib
+import random
 import secrets
 import sys
+import tempfile
 from concurrent.futures import ThreadPoolExecutor
 
 import httpx
+
+# движок: у Меллстроя те же шансы и выплаты, что у собачьего автомата (с одним и тем же генератором результат совпадает полностью)
+os.environ.setdefault("LQ_DB", os.path.join(tempfile.mkdtemp(), "meme-engine.db"))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+from server import slots, slots_meme  # noqa: E402
+
+for seed in range(3000):
+    for bet in (10, 500, 100000):
+        assert slots_meme.play_meme(bet, random.Random(seed)) == slots.play(bet, random.Random(seed)), (seed, bet)
 
 BASE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8011"
 TOKEN = secrets.token_hex(5)
@@ -36,7 +49,10 @@ assert {s["id"] for s in state["meta"]["symbols"]} == {
 }
 assert all(len(s["pays"]) == 3 for s in state["meta"]["symbols"] if s.get("pays"))
 assert len(state["meta"]["lines"]) == 10
-assert state["meta"]["payout_scale"] == 0.75 and state["meta"]["boost_chance"] == 0.25
+assert "payout_scale" not in state["meta"] and "boost_chance" not in state["meta"]
+dog_meta = user.get("/api/slots/state").json()["meta"]
+assert state["meta"]["lines"] == dog_meta["lines"] and state["meta"]["scatter_pays"] == dog_meta["scatter_pays"]
+assert [s["pays"] for s in state["meta"]["symbols"]] == [s["pays"] for s in dog_meta["symbols"]], "Таблица выплат Меллстроя должна совпадать с собачьей"
 for bad in [0, 3, 11, 15, 25, 100001]:
     r = user.post("/api/slots/meme/spin", json={"bet": bad, "request_id": "bad-request-000001"})
     assert r.status_code in (400, 422), (bad, r.text)
