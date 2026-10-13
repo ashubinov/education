@@ -20,6 +20,7 @@ from . import chat_telegram_relay
 from . import arena, arena_pvp, farm, lab, letuchki, minigames, pet, petun, pixels, planner
 from . import slots_meme
 from . import clans
+from . import themes
 from .db import db, jd, jl
 from .llm import llm
 from .schemas import THEME_DEFAULT, AnswerIn, BanIn, FriendRequestIn, GoalIn, LoginIn, MeUpdate, PasswordChangeIn, PublishIn, RegisterIn, SettingsUpdate, SignatureIn, SlotBuyIn, SlotSpinIn, StartIn, UsernameChangeIn
@@ -44,6 +45,7 @@ async def lifespan(app: FastAPI):
     slots_meme.init_schema()
     clans.init_schema()
     planner.init_schema()
+    themes.init_schema()
     generator.set_loop(asyncio.get_running_loop())
     arena_pvp.set_loop(asyncio.get_running_loop())
     catalog.system_user_id()
@@ -121,6 +123,7 @@ app.include_router(lab.router)
 app.include_router(clans.router)
 app.include_router(slots_meme.router)
 app.include_router(planner.router)
+app.include_router(themes.router)
 
 # ---------- CORS: фронт на GitHub Pages ходит на этот бэкенд с другого домена; авторизация — Bearer-токеном, куки не нужны ----------
 _local = [f"http://127.0.0.1:{config.PORT}", f"http://localhost:{config.PORT}"]
@@ -185,7 +188,7 @@ def user_public(u: dict) -> dict:
     xp = gm.total_xp(u["id"])
     out = {
         "id": u["id"], "username": u["username"], "display_name": u["display_name"] or u["username"], "avatar": u["avatar"],
-        "avatar_url": avatars.url(u["id"]), "theme_color": u["theme_color"], "theme_mode": u["theme_mode"], "theme_extra": {**THEME_DEFAULT, **(jl(u.get("theme_extra"), {}) or {})}, "sound": bool(u["sound"]),
+        "avatar_url": avatars.url(u["id"]), "theme_color": u["theme_color"], "theme_mode": u["theme_mode"], "theme_extra": {**THEME_DEFAULT, **(jl(u.get("theme_extra"), {}) or {})}, "theme_custom": themes.active(u), "sound": bool(u["sound"]),
         "reminders_on": bool(u["reminders_on"]), "reminder_time": u["reminder_time"], "is_admin": bool(u["is_admin"]),
         "must_change_password": bool(u.get("must_change")),
         "telegram": bool(u["tg_chat_id"]), "level": gm.level_info(xp), "streak": gm.streak_info(u["id"]), "clan": clans.of_user(u["id"]),
@@ -275,6 +278,9 @@ async def update_me(request: Request, body: MeUpdate):
         if k in fields:
             fields[k] = int(fields[k])
     if "theme_extra" in fields:
+        cid = fields["theme_extra"].get("custom")
+        if cid is not None and not themes.owns(u["id"], cid):
+            raise HTTPException(400, "Такой темы нет")
         fields["theme_extra"] = jd(fields["theme_extra"])
     if fields:
         sets = ", ".join(f"{k}=?" for k in fields)
