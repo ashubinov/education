@@ -29,7 +29,7 @@ MIN_BET, MAX_BET, STEP = 10, 200, 10
 MAX_COMMITTED = 2000  # per player, over the entire match
 MAX_RAISES = 3  # per betting phase
 MIN_FULLNESS = 20
-INVITE_SECONDS, TURN_SECONDS, COMBAT_SECONDS = 120, 35, 20
+INVITE_SECONDS, TURN_SECONDS, COMBAT_SECONDS = 120, 35, 15
 BASE_HP = 120.0
 QTE_SECONDS = 4.2
 ATTACK_INTERVAL = 0.32
@@ -780,7 +780,8 @@ def get_state(uid: int):
         result = {"active": _present(active, uid) if active else None,
                   "recent": [_present(m, uid) for m in latest], "balance": balance, "server_now": now,
                   "limits": {"min_bet": MIN_BET, "max_bet": MAX_BET, "step": STEP, "daily": DAILY_LIMIT,
-                             "pair": PAIR_LIMIT, "turn_seconds": TURN_SECONDS, "invite_seconds": INVITE_SECONDS},
+                             "pair": PAIR_LIMIT, "turn_seconds": TURN_SECONDS, "invite_seconds": INVITE_SECONDS,
+                             "combat_seconds": COMBAT_SECONDS},
                   "pet": None, "friends": []}
         own = pet._get(uid)
         result["pet"] = pet._view(own, now) if own else None
