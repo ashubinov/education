@@ -19,6 +19,7 @@ from . import chat_commands
 from . import chat_telegram_relay
 from . import arena, farm, lab, minigames, pet, pixels
 from . import slots_meme
+from . import clans
 from .db import db, jd, jl
 from .llm import llm
 from .schemas import THEME_DEFAULT, AnswerIn, BanIn, FriendRequestIn, GoalIn, LoginIn, MeUpdate, PasswordChangeIn, PublishIn, RegisterIn, SettingsUpdate, SignatureIn, SlotBuyIn, SlotSpinIn, StartIn, UsernameChangeIn
@@ -38,6 +39,7 @@ async def lifespan(app: FastAPI):
     farm.init_schema()
     lab.init_schema()
     slots_meme.init_schema()
+    clans.init_schema()
     generator.set_loop(asyncio.get_running_loop())
     catalog.system_user_id()
     # восстановление после перезапуска
@@ -90,6 +92,7 @@ app.include_router(pet.router)
 app.include_router(arena.router)
 app.include_router(farm.router)
 app.include_router(lab.router)
+app.include_router(clans.router)
 app.include_router(slots_meme.router)
 
 # ---------- CORS: фронт на GitHub Pages ходит на этот бэкенд с другого домена; авторизация — Bearer-токеном, куки не нужны ----------
@@ -158,7 +161,7 @@ def user_public(u: dict) -> dict:
         "avatar_url": avatars.url(u["id"]), "theme_color": u["theme_color"], "theme_mode": u["theme_mode"], "theme_extra": {**THEME_DEFAULT, **(jl(u.get("theme_extra"), {}) or {})}, "sound": bool(u["sound"]),
         "reminders_on": bool(u["reminders_on"]), "reminder_time": u["reminder_time"], "is_admin": bool(u["is_admin"]),
         "must_change_password": bool(u.get("must_change")),
-        "telegram": bool(u["tg_chat_id"]), "level": gm.level_info(xp), "streak": gm.streak_info(u["id"]),
+        "telegram": bool(u["tg_chat_id"]), "level": gm.level_info(xp), "streak": gm.streak_info(u["id"]), "clan": clans.of_user(u["id"]),
     }
     if u["is_admin"]:
         out["moderation_pending"] = social.pending_count()
