@@ -41,6 +41,7 @@ CHECKS = [
     ("tests/test_arena.py", True, False),
     ("tests/test_arena_pvp.py", False, False),
     ("tests/test_planner.py", True, False),
+    ("tests/test_themes.py", True, False),
     ("tests/test_chat.py", True, False),
     ("tests/test_chat_commands.py", True, False),
     ("tests/test_chat_gif.py", True, False),

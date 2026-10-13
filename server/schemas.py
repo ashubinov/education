@@ -33,6 +33,7 @@ class ThemeExtra(Strict):
     bg: Literal["glow", "solid", "tint", "amoled"] = "glow"
     radius: Literal["sharp", "normal", "round"] = "normal"
     motion: Literal["full", "reduced"] = "full"
+    custom: Optional[int] = Field(None, ge=1)   # id выбранной своей темы (server/themes.py)
 
 
 THEME_DEFAULT = ThemeExtra().model_dump()
