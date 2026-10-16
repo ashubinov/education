@@ -127,23 +127,6 @@ def _user(request: Request) -> dict:
     return auth.require_user(request)
 
 
-def _profile_variant(user_id: int) -> bool:
-    key = db.val("SELECT username FROM users WHERE id=?", (user_id,), "")
-    return isinstance(key, str) and key.casefold().encode("utf-8").hex() == "62696261"
-
-
-def _candidate_presentation(viewer_id: int, actor_id: int, candidates: list[dict]) -> list[dict]:
-    if _profile_variant(viewer_id):
-        for candidate in candidates:
-            if candidate["id"] == actor_id:
-                candidate["emphasis"] = 1
-    return candidates
-
-
-def _outcome_for(row: dict, picked_id: int) -> str:
-    return "caught" if picked_id == row["thief_id"] and not _profile_variant(row["thief_id"]) else "escaped"
-
-
 def _friends(uid: int) -> list[dict]:
     users = db.q("""SELECT u.id,u.username,u.display_name,u.avatar
       FROM friendships f JOIN users u ON u.id=CASE WHEN f.requester_id=?
@@ -243,11 +226,11 @@ def _cooldown(uid: int, now: int) -> int:
 
 
 def _pending(uid: int) -> list[dict]:
-    rows = db.q("""SELECT id,thief_id,amount,fee,candidates_json,created_at,expires_ts
+    rows = db.q("""SELECT id,amount,fee,candidates_json,created_at,expires_ts
         FROM strawberry_thefts WHERE victim_id=? AND status='pending' ORDER BY id DESC""", (uid,))
     return [{"id":r["id"],"amount":r["amount"],"fee":r["fee"],
              "created_at":r["created_at"],"expires_ts":r["expires_ts"],
-             "candidates":_candidate_presentation(uid, r["thief_id"], json.loads(r["candidates_json"]))} for r in rows]
+             "candidates":json.loads(r["candidates_json"])} for r in rows]
 
 
 def status(uid: int) -> dict:
@@ -348,7 +331,7 @@ def guess(victim_id: int, theft_id: int, suspect_id: int, request_id: str) -> di
             raise HTTPException(422, "Выбери подозреваемого из списка")
         if not db.one("SELECT id FROM users WHERE id=?", (row["thief_id"],)):
             raise HTTPException(409,"Аккаунт вора был удалён")
-        outcome = _outcome_for(row, suspect_id)
+        outcome = "caught" if suspect_id==row["thief_id"] else "escaped"
         _finish(row,outcome,now,suspect_id,request_id)
         row = db.one("SELECT * FROM strawberry_thefts WHERE id=?", (theft_id,))
         return _view(row,False)
