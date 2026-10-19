@@ -71,7 +71,7 @@ assert f["level"] == 1 and f["coins"] == D.START_COINS and f["plots"] == D.START
 assert len(s["plots"]) == D.START_PLOTS and all(p["state"] == "empty" for p in s["plots"])
 assert len(s["orders"]) == D.ORDER_SLOTS and all(o["items"] and o["coins"] > 0 for o in s["orders"])
 assert all(D.unlock_level(i) <= 1 for o in s["orders"] for i in o["items"]), "на 1 уровне просят только то, что уже можно получить"
-assert set(s["prices"]) == set(D.ITEMS) and s["exchange"]["balance"] == 1000 and s["exchange"]["out_left"] == D.EXCHANGE_OUT_DAILY
+assert set(s["prices"]) == set(D.ITEMS) and s["exchange"]["balance"] == 1000 
 print("OK: старт фермы")
 
 # ----------------------------------------------------------------------------- посадка
@@ -215,19 +215,27 @@ assert "монет" in err(a.post("/api/farm/order/skip", json={"slot": 1}))
 print("OK: заказы — сдача, награда, замена, пропуск")
 
 # ----------------------------------------------------------------------------- обмен на жетоны
-sql("UPDATE farm SET coins=10000, out_used=0, out_day='' WHERE user_id=?", (ua["id"],))
+sql("UPDATE farm SET coins=10000 WHERE user_id=?", (ua["id"],))
 bal0 = a.get("/api/farm").json()["exchange"]["balance"]
 s = a.post("/api/farm/exchange", json={"direction": "out", "amount": 100}).json()
-assert s["exchange"]["balance"] == bal0 + 100 and s["farm"]["coins"] == 10000 - 100 * D.EXCHANGE_OUT_RATE and s["exchange"]["out_left"] == D.EXCHANGE_OUT_DAILY - 100
-assert "За сутки" in err(a.post("/api/farm/exchange", json={"direction": "out", "amount": D.EXCHANGE_OUT_DAILY}))
+assert D.EXCHANGE_OUT_RATE == 1 and D.EXCHANGE_IN_RATE == 1, "курс обмена — 1 к 1 в обе стороны"
+assert s["exchange"]["balance"] == bal0 + 100 and s["farm"]["coins"] == 10000 - 100
+assert "out_left" not in s["exchange"] and "out_daily" not in s["exchange"], "суточного лимита нет"
+# выводить можно сколько угодно: много раз подряд и сразу большой суммой, без «лимита в сутки»
+for _ in range(4):
+    s = a.post("/api/farm/exchange", json={"direction": "out", "amount": 300}).json()
+assert s["exchange"]["balance"] == bal0 + 100 + 1200 and s["farm"]["coins"] == 10000 - 1300
+s = a.post("/api/farm/exchange", json={"direction": "out", "amount": 8700}).json()
+assert s["farm"]["coins"] == 0 and s["exchange"]["balance"] == bal0 + 10000, "можно вывести все монеты разом"
+sql("UPDATE farm SET coins=10000 WHERE user_id=?", (ua["id"],))
 s = a.post("/api/farm/exchange", json={"direction": "in", "amount": 50}).json()
-assert s["exchange"]["balance"] == bal0 + 50 and s["farm"]["coins"] == 10000 - 500 + 50 * D.EXCHANGE_IN_RATE
-assert "Недостаточно" in err(a.post("/api/farm/exchange", json={"direction": "in", "amount": 4999}))
-sql("UPDATE farm SET coins=3, out_used=0 WHERE user_id=?", (ua["id"],))
+assert s["exchange"]["balance"] == bal0 + 10000 - 50 and s["farm"]["coins"] == 10000 + 50 * D.EXCHANGE_IN_RATE
+assert "Недостаточно" in err(a.post("/api/farm/exchange", json={"direction": "in", "amount": 10**8}))
+sql("UPDATE farm SET coins=3 WHERE user_id=?", (ua["id"],))
 assert "монет" in err(a.post("/api/farm/exchange", json={"direction": "out", "amount": 5}))
 assert a.post("/api/farm/exchange", json={"direction": "sideways", "amount": 5}).status_code == 422
 assert a.post("/api/farm/exchange", json={"direction": "in", "amount": -5}).status_code == 422
-print("OK: обмен — курс, суточный лимит")
+print("OK: обмен — курс 1 к 1, без суточного лимита")
 
 # ----------------------------------------------------------------------------- гонка: двойной сбор не удваивает урожай
 sql("DELETE FROM farm_plots WHERE user_id=?", (ub["id"],))

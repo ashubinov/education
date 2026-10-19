@@ -2,7 +2,7 @@
 
 Время идёт по меткам (planted_at/ready_at), состояние считается при каждом запросе — фоновых задач нет, ферма «растёт», пока игрока нет.
 Каждое действие — одна транзакция: сначала всё проверяется (уровень, монеты, склад), потом пишется. Ответ на любое действие — полное состояние фермы.
-Монеты фермы свои; обмен на общие жетоны (слоты, питомец, пикселы) идёт по невыгодному курсу и с суточным лимитом.
+Монеты фермы свои; обмен на общие жетоны (слоты, питомец, пикселы) идёт в обе стороны 1 к 1 и без суточного лимита.
 """
 import json
 import secrets
@@ -15,7 +15,7 @@ from starlette.concurrency import run_in_threadpool
 from . import auth, slots
 from . import gamification as gm
 from .db import db
-from .farm_data import (ANIMALS, CAPACITY_STEP, CROPS, EXCHANGE_IN_RATE, EXCHANGE_MAX, EXCHANGE_OUT_DAILY, EXCHANGE_OUT_RATE, ITEMS, MAX_CAPACITY, MAX_LEVEL,
+from .farm_data import (ANIMALS, CAPACITY_STEP, CROPS, EXCHANGE_IN_RATE, EXCHANGE_MAX, EXCHANGE_OUT_RATE, ITEMS, MAX_CAPACITY, MAX_LEVEL,
                         MAX_PLOTS, ORDER_SLOTS, PEN_SIZE, RECIPES, START_CAPACITY, START_COINS, START_PLOTS, capacity_cost, level_of, plot_cost,
                         price_mult, sell_price, unlock_level, xp_for_level)
 
@@ -194,7 +194,6 @@ def get_state(user_id: int, events: list | None = None) -> dict:
         kitchen = {"recipe": k["recipe"], "state": "ready" if left <= 0 else "working", "left": round(left), "total": round(k["ready_at"] - k["started_at"])}
     orders = [{"slot": r["slot"], "items": json.loads(r["items"]), "coins": r["coins"], "xp": r["xp"]} for r in db.q("SELECT * FROM farm_orders WHERE user_id=? ORDER BY slot", (user_id,))]
     stock = _stock(user_id)
-    out_used = f["out_used"] if f["out_day"] == day else 0
     out = {
         "farm": {"level": lvl, "max_level": MAX_LEVEL, "xp": f["xp"], "xp_from": xp_for_level(lvl), "xp_next": xp_for_level(lvl + 1) if lvl < MAX_LEVEL else None, "coins": f["coins"],
                  "plots": f["plots"], "max_plots": MAX_PLOTS, "plot_cost": plot_cost(f["plots"]) if f["plots"] < MAX_PLOTS else None,
@@ -203,7 +202,7 @@ def get_state(user_id: int, events: list | None = None) -> dict:
         "plots": plot_view, "pens": pen_view, "kitchen": kitchen, "orders": orders, "stock": stock,
         "prices": {i: {"price": sell_price(i, day), "mult": price_mult(i, day)} for i in ITEMS},
         "catalog": {"crops": list(CROPS.values()), "animals": list(ANIMALS.values()), "recipes": list(RECIPES.values()), "items": ITEMS, "skip_cost": SKIP_COST},
-        "exchange": {"balance": bal, "in_rate": EXCHANGE_IN_RATE, "out_rate": EXCHANGE_OUT_RATE, "out_left": max(0, EXCHANGE_OUT_DAILY - out_used), "out_daily": EXCHANGE_OUT_DAILY},
+        "exchange": {"balance": bal, "in_rate": EXCHANGE_IN_RATE, "out_rate": EXCHANGE_OUT_RATE},
         "events": events or [],
     }
     return out
@@ -447,7 +446,6 @@ def upgrade_storage(user_id: int) -> dict:
 
 
 def exchange(user_id: int, direction: str, amount: int) -> dict:
-    day = gm.today()
     with db.tx():
         f = _farm(user_id)
         sa = slots.ensure_account(user_id)
@@ -457,13 +455,10 @@ def exchange(user_id: int, direction: str, amount: int) -> dict:
             db.x("UPDATE slot_accounts SET balance=balance-?, updated_at=CURRENT_TIMESTAMP WHERE user_id=?", (amount, user_id))
             db.x("UPDATE farm SET coins=coins+? WHERE user_id=?", (amount * EXCHANGE_IN_RATE, user_id))
         else:  # amount — сколько жетонов хочу получить
-            used = f["out_used"] if f["out_day"] == day else 0
-            if used + amount > EXCHANGE_OUT_DAILY:
-                raise HTTPException(400, f"За сутки можно получить не больше {EXCHANGE_OUT_DAILY} жетонов, осталось {max(0, EXCHANGE_OUT_DAILY - used)}")
             cost = amount * EXCHANGE_OUT_RATE
             if f["coins"] < cost:
                 raise HTTPException(400, f"Не хватает монет: нужно {cost}, у тебя {f['coins']}")
-            db.x("UPDATE farm SET coins=coins-?, out_day=?, out_used=? WHERE user_id=?", (cost, day, used + amount, user_id))
+            db.x("UPDATE farm SET coins=coins-? WHERE user_id=?", (cost, user_id))
             db.x("UPDATE slot_accounts SET balance=balance+?, updated_at=CURRENT_TIMESTAMP WHERE user_id=?", (amount, user_id))
     return get_state(user_id)
 
