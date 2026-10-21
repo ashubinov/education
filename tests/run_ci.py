@@ -39,6 +39,7 @@ CHECKS = [
     ("tests/test_pet.py", True, False),
     ("tests/test_farm.py", True, False),
     ("tests/test_lab.py", True, False),
+    ("tests/test_lake.py", True, False),
     ("tests/test_arena.py", True, False),
     ("tests/test_arena_pvp.py", False, False),
     ("tests/test_planner.py", True, False),

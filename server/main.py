@@ -17,7 +17,7 @@ from . import gamification as gm
 from . import chat
 from . import chat_commands
 from . import chat_telegram_relay
-from . import arena, arena_pvp, farm, lab, letuchki, minigames, pet, petun, pixels, planner
+from . import arena, arena_pvp, farm, lab, lake, letuchki, minigames, pet, petun, pixels, planner
 from . import slots_meme
 from . import clans
 from . import themes
@@ -42,6 +42,7 @@ async def lifespan(app: FastAPI):
     letuchki.init_schema()
     farm.init_schema()
     lab.init_schema()
+    lake.init_schema()
     slots_meme.init_schema()
     clans.init_schema()
     planner.init_schema()
@@ -120,6 +121,7 @@ app.include_router(petun.router)
 app.include_router(letuchki.router)
 app.include_router(farm.router)
 app.include_router(lab.router)
+app.include_router(lake.router)
 app.include_router(clans.router)
 app.include_router(slots_meme.router)
 app.include_router(planner.router)
@@ -697,7 +699,7 @@ async def friend_profile(uid: int, request: Request):
                    "answers": db.val("SELECT SUM(answers) FROM activity WHERE user_id=?", (uid,), 0) or 0},
         "week": gm.week(uid),
         "courses": [{"title": c["title"], "icon": c["icon"], "status": c["status"], "xp": gm.total_xp(uid, c["id"]), "progress": course_progress(c)} for c in courses],
-        "achievements": ach, "slots": slots.public_stats(uid), "pixels": pixels.public_stats(uid), "pet": pet.public_view(uid, u["id"]), "farm": farm.public_stats(uid), "lab": lab.public_stats(uid),
+        "achievements": ach, "slots": slots.public_stats(uid), "pixels": pixels.public_stats(uid), "pet": pet.public_view(uid, u["id"]), "farm": farm.public_stats(uid), "lab": lab.public_stats(uid), "lake": lake.public_stats(uid),
         "wall": social.wall(uid), "my_signature": social.my_signature(u["id"], uid), "sign_max": social.SIGN_MAX,
     }
 
