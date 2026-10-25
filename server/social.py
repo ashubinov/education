@@ -247,7 +247,7 @@ def unban(uid: int):
 
 def delete_user(admin_id: int, uid: int):
     """Удалить пользователя навсегда: аккаунт, курсы с уроками и прогрессом, друзей, подписи, аватарку."""
-    from . import catalog, slots, minigames, petun, pixels, pet, farm, lab, lake, apiary, mine, caravan, arena, arena_pvp, planner, themes  # здесь, чтобы не создавать цикл импорта
+    from . import catalog, slots, minigames, petun, pixels, pet, farm, lab, lake, airport, apiary, mine, caravan, arena, arena_pvp, planner, themes  # здесь, чтобы не создавать цикл импорта
     u = db.one("SELECT * FROM users WHERE id=?", (uid,))
     if not u or u["username"] == auth.SYSTEM_USERNAME:
         raise HTTPException(404, "Пользователь не найден")
@@ -266,6 +266,7 @@ def delete_user(admin_id: int, uid: int):
     farm.delete_user_data(uid)
     lab.delete_user_data(uid)
     lake.delete_user_data(uid)
+    airport.delete_user_data(uid)
     apiary.delete_user_data(uid)
     mine.delete_user_data(uid)
     caravan.delete_user_data(uid)

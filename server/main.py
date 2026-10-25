@@ -17,7 +17,7 @@ from . import gamification as gm
 from . import chat
 from . import chat_commands
 from . import chat_telegram_relay
-from . import apiary, arena, arena_pvp, caravan, farm, lab, lake, letuchki, mine, world, minigames, pet, petun, pixels, planner
+from . import airport, apiary, arena, arena_pvp, caravan, farm, lab, lake, letuchki, mine, world, minigames, pet, petun, pixels, planner
 from . import slots_meme
 from . import clans
 from . import themes
@@ -43,6 +43,7 @@ async def lifespan(app: FastAPI):
     farm.init_schema()
     lab.init_schema()
     lake.init_schema()
+    airport.init_schema()
     apiary.init_schema()
     mine.init_schema()
     caravan.init_schema()
@@ -125,6 +126,7 @@ app.include_router(letuchki.router)
 app.include_router(farm.router)
 app.include_router(lab.router)
 app.include_router(lake.router)
+app.include_router(airport.router)
 app.include_router(apiary.router)
 app.include_router(mine.router)
 app.include_router(caravan.router)

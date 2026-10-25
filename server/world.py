@@ -1,13 +1,13 @@
 """Карта мира фермы: список локаций, замки по уровню фермы и значки «что-то готово» (одна страница `#/farm/map`).
 
-Ферма — центр, вокруг неё локации: лаборатория (подвал), озеро, пасека, шахта и торговый тракт. Данные берутся у самих локаций, чтобы правила замков не дублировались.
+Ферма — центр, вокруг неё локации: лаборатория (подвал), озеро, пасека, шахта, торговый тракт и аэропорт. Данные берутся у самих локаций, чтобы правила замков не дублировались.
 """
 import time
 
 from fastapi import APIRouter, Request
 from starlette.concurrency import run_in_threadpool
 
-from . import apiary, auth, caravan, farm, lab, lake, mine
+from . import airport, apiary, auth, caravan, farm, lab, lake, mine
 from .db import db
 
 router = APIRouter(prefix="/api/world", tags=["Карта мира"])
@@ -20,6 +20,7 @@ LOCATIONS = [
     ("apiary", "Пасека", "🐝", "#/farm/apiary", apiary.UNLOCK_FARM_LEVEL, apiary.ready_count),
     ("mine", "Шахта", "⛏️", "#/farm/mine", mine.UNLOCK_FARM_LEVEL, mine.ready_count),
     ("caravan", "Торговый тракт", "🐎", "#/farm/caravan", caravan.UNLOCK_FARM_LEVEL, caravan.ready_count),
+    ("airport", "Аэропорт", "✈️", "#/farm/airport", airport.UNLOCK_FARM_LEVEL, airport.ready_count),
 ]
 
 
