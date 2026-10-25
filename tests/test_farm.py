@@ -55,7 +55,19 @@ day = "2026-01-01"
 assert all(0.85 <= D.price_mult(i, day) <= 1.3 and D.sell_price(i, day) >= 1 for i in D.ITEMS)
 assert D.price_mult("egg", day) == D.price_mult("egg", day)
 assert D.plot_cost(D.START_PLOTS) < D.plot_cost(D.START_PLOTS + 1)
-print("OK: данные — культуры, животные, рецепты, уровни, цены")
+# склад растёт до 5000 мест, каждое расширение дороже предыдущего и ведёт в точку, где ещё есть что покупать
+assert D.MAX_CAPACITY == 5000 and D.capacity_cost(D.MAX_CAPACITY) is None and D.next_capacity(D.MAX_CAPACITY) is None
+cap, prev, steps = D.START_CAPACITY, 0, 0
+while cap < D.MAX_CAPACITY:
+    cost, nxt = D.capacity_cost(cap), D.next_capacity(cap)
+    assert nxt > cap and cost > prev, (cap, cost, prev)
+    cap, prev, steps = nxt, cost, steps + 1
+assert cap == 5000 and D.next_capacity(270) == 300 and D.next_capacity(300) > 300
+# кухня: 10 очередей, первые 4 по обычной цене, шесть последних — 50 000, 100 000, ... 300 000
+assert D.KITCHEN_MAX == 10 and D.KITCHEN_NORMAL == 4 and D.kitchen_cost(0) == 0 and D.kitchen_cost(10) is None
+assert [D.kitchen_cost(i) for i in range(4, 10)] == [50000 * k for k in range(1, 7)]
+assert [D.kitchen_cost(i) for i in range(1, 4)] == sorted(D.kitchen_cost(i) for i in range(1, 4)) and 0 < D.kitchen_cost(1) < D.kitchen_cost(3) < 50000
+print("OK: данные — культуры, животные, рецепты, уровни, цены, склад и очереди кухни")
 
 adm, au = reg("adm")
 a, ua = reg("farma")
@@ -167,18 +179,76 @@ print("OK: животные — покупка, корм, цикл, сбор")
 assert "нет" in err(a.post("/api/farm/cook", json={"recipe": "bogus"}))
 assert "Не хватает" in err(a.post("/api/farm/cook", json={"recipe": "bread"}))
 sql("INSERT INTO farm_stock(user_id, item, qty) VALUES(?, 'wheat', 5) ON CONFLICT(user_id,item) DO UPDATE SET qty=5", (ua["id"],))
+k0 = a.get("/api/farm").json()["kitchen"]
+assert k0["count"] == 1 and k0["max"] == D.KITCHEN_MAX and k0["queues"] == [{"slot": 0, "state": "empty"}] and k0["next_cost"] == D.kitchen_cost(1)
 s = a.post("/api/farm/cook", json={"recipe": "bread"}).json()
-assert s["kitchen"]["state"] == "working" and s["stock"]["wheat"] == 2
-assert "занята" in err(a.post("/api/farm/cook", json={"recipe": "bread"}))
+assert s["kitchen"]["queues"][0]["state"] == "working" and s["stock"]["wheat"] == 2
+assert "заняты" in err(a.post("/api/farm/cook", json={"recipe": "bread"}))
 assert "Ещё не готово" in err(a.post("/api/farm/cook/collect"))
 sql("UPDATE farm_kitchen SET ready_at=? WHERE user_id=?", (time.time() - 1, ua["id"]))
-assert a.get("/api/farm").json()["kitchen"]["state"] == "ready"
+assert a.get("/api/farm").json()["kitchen"]["queues"][0]["state"] == "ready" and a.get("/api/farm").json()["kitchen"]["ready"] == 1
 s = a.post("/api/farm/cook/collect").json()
-assert s["stock"]["bread"] == D.RECIPES["bread"]["qty"] and s["kitchen"] is None
+assert s["stock"]["bread"] == D.RECIPES["bread"]["qty"] and s["kitchen"]["queues"][0]["state"] == "empty"
 assert "ничего" in err(a.post("/api/farm/cook/collect"))
 sql("UPDATE farm SET xp=0 WHERE user_id=?", (ua["id"],))
 assert "уровне" in err(a.post("/api/farm/cook", json={"recipe": "pie"}))
 print("OK: кухня — рецепт, время, сбор")
+
+# ----------------------------------------------------------------------------- очереди кухни: покупка, параллельная готовка, сбор
+sql("UPDATE farm SET xp=160, coins=0, capacity=500 WHERE user_id=?", (ua["id"],))
+assert a.post("/api/farm/cook", json={"recipe": "bread", "slot": 10}).status_code == 422 and a.post("/api/farm/cook", json={"recipe": "bread", "slot": -1}).status_code == 422
+assert "нет" in err(a.post("/api/farm/cook", json={"recipe": "bread", "slot": 1})), "чужой очереди не бывает"
+sql("INSERT INTO farm_stock(user_id, item, qty) VALUES(?, 'wheat', 100) ON CONFLICT(user_id,item) DO UPDATE SET qty=100", (ua["id"],))
+assert "монет" in err(a.post("/api/farm/kitchen/buy"))
+total_cost = sum(D.kitchen_cost(i) for i in range(1, D.KITCHEN_MAX))
+sql("UPDATE farm SET coins=? WHERE user_id=?", (total_cost + 5, ua["id"]))
+for n in range(1, D.KITCHEN_MAX):
+    before = a.get("/api/farm").json()["farm"]["coins"]
+    s = a.post("/api/farm/kitchen/buy").json()
+    assert s["kitchen"]["count"] == n + 1 and len(s["kitchen"]["queues"]) == n + 1 and s["farm"]["coins"] == before - D.kitchen_cost(n), n
+assert s["farm"]["coins"] == 5 and s["kitchen"]["next_cost"] is None
+assert "не бывает" in err(a.post("/api/farm/kitchen/buy"))
+for i in range(D.KITCHEN_MAX):
+    s = a.post("/api/farm/cook", json={"recipe": "bread"}).json()
+    assert [q["state"] for q in s["kitchen"]["queues"]].count("working") == i + 1, "каждое блюдо идёт в свою очередь"
+assert "заняты" in err(a.post("/api/farm/cook", json={"recipe": "bread"})) and "занята" in err(a.post("/api/farm/cook", json={"recipe": "bread", "slot": 4}))
+sql("UPDATE farm_kitchen SET ready_at=? WHERE user_id=? AND slot IN (0, 3, 7)", (time.time() - 1, ua["id"]))
+bread0 = a.get("/api/farm").json()["stock"].get("bread", 0)
+s = a.post("/api/farm/cook/collect", json={"slot": 3}).json()
+assert s["kitchen"]["queues"][3]["state"] == "empty" and s["kitchen"]["ready"] == 2 and s["stock"]["bread"] == bread0 + D.RECIPES["bread"]["qty"]
+assert "Ещё не готово" in err(a.post("/api/farm/cook/collect", json={"slot": 5}))
+s = a.post("/api/farm/cook/collect").json()      # без номера — из всех готовых
+assert s["kitchen"]["ready"] == 0 and s["kitchen"]["working"] == D.KITCHEN_MAX - 3
+# не влезает на склад — забирается сколько помещается, остальное ждёт
+sql("UPDATE farm_kitchen SET ready_at=? WHERE user_id=?", (time.time() - 1, ua["id"]))
+used = a.get("/api/farm").json()["farm"]
+sql("UPDATE farm SET capacity=? WHERE user_id=?", (used["stock_total"] + D.RECIPES["bread"]["qty"], ua["id"]))
+s = a.post("/api/farm/cook/collect").json()
+assert s["kitchen"]["ready"] == D.KITCHEN_MAX - 3 - 1 and any(e["type"] == "full" for e in s["events"])
+assert "нет места" in err(a.post("/api/farm/cook/collect"))
+sql("DELETE FROM farm_kitchen WHERE user_id=?", (ua["id"],))
+sql("DELETE FROM farm_stock WHERE user_id=? AND item IN ('wheat', 'bread')", (ua["id"],))
+sql("UPDATE farm SET capacity=?, coins=0, xp=0 WHERE user_id=?", (D.START_CAPACITY, ua["id"]))
+print("OK: кухня — очереди: покупка по ценам, 10 одновременных блюд, сбор по номеру и всех сразу, склад")
+
+# ----------------------------------------------------------------------------- склад до 5000 мест
+f0 = a.get("/api/farm").json()["farm"]
+assert f0["capacity"] == D.START_CAPACITY and f0["capacity_next"] == D.START_CAPACITY + D.CAPACITY_STEP and f0["max_capacity"] == 5000
+sql("UPDATE farm SET coins=0 WHERE user_id=?", (ua["id"],))
+assert "монет" in err(a.post("/api/farm/storage/upgrade"))
+sql("UPDATE farm SET coins=10000000 WHERE user_id=?", (ua["id"],))
+caps = [f0["capacity"]]
+while True:
+    r = a.post("/api/farm/storage/upgrade")
+    if r.status_code != 200:
+        assert "самый большой" in err(r)
+        break
+    caps.append(r.json()["farm"]["capacity"])
+assert caps[-1] == 5000 and caps == sorted(set(caps)) and 300 in caps and caps[caps.index(300) + 1] > 300
+fin = a.get("/api/farm").json()["farm"]
+assert fin["capacity_cost"] is None and fin["capacity_next"] is None
+sql("UPDATE farm SET capacity=?, coins=0 WHERE user_id=?", (D.START_CAPACITY, ua["id"]))
+print("OK: склад — расширяется ступенями до 5000 и дальше не растёт")
 
 # ----------------------------------------------------------------------------- рынок
 sql("UPDATE farm SET xp=40, coins=10 WHERE user_id=?", (ua["id"],))

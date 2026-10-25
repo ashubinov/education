@@ -11,8 +11,16 @@ START_COINS = 60
 START_PLOTS = 4
 MAX_PLOTS = 16
 START_CAPACITY = 60
-CAPACITY_STEP = 30
-MAX_CAPACITY = 300
+CAPACITY_STEP = 30           # до 300 мест склад растёт ровными шагами
+CAPACITY_GRID_MAX = 300
+# «Большой склад»: дальше ступени покрупнее — (вместимость после покупки, цена)
+_BIG_STORAGE = [(500, 1500), (800, 3500), (1200, 7500), (1700, 15000), (2300, 30000), (3000, 55000), (3800, 90000), (4400, 140000), (5000, 200000)]
+MAX_CAPACITY = _BIG_STORAGE[-1][0]
+# Очереди кухни (рецепты готовятся одновременно, по одному блюду на очередь). Первая — с самого начала, ещё три — по обычным ценам,
+# шесть последних — «по оверпрайсу»: от 50 000 и каждая следующая на 50 000 дороже.
+KITCHEN_MAX = 10
+KITCHEN_NORMAL = 4
+_KITCHEN_PRICES = [0, 400, 1500, 4000] + [50000 * i for i in range(1, KITCHEN_MAX - KITCHEN_NORMAL + 1)]
 PEN_SIZE = 4                 # животных в одном загоне
 ORDER_SLOTS = 3
 EXCHANGE_IN_RATE = 1         # 1 жетон → 1 монета фермы
@@ -103,4 +111,23 @@ def plot_cost(owned: int) -> int:
 
 
 def capacity_cost(capacity: int) -> int:
-    return 80 + (capacity - START_CAPACITY) // CAPACITY_STEP * 70
+    """Цена следующего расширения склада с текущей вместимостью capacity (None — выше некуда)."""
+    if capacity >= MAX_CAPACITY:
+        return None
+    if capacity < CAPACITY_GRID_MAX:
+        return 80 + (capacity - START_CAPACITY) // CAPACITY_STEP * 70
+    return next(cost for cap, cost in _BIG_STORAGE if cap > capacity)
+
+
+def next_capacity(capacity: int) -> int | None:
+    """Вместимость после следующего расширения (None — склад уже самый большой)."""
+    if capacity >= MAX_CAPACITY:
+        return None
+    if capacity < CAPACITY_GRID_MAX:
+        return capacity + CAPACITY_STEP
+    return next(cap for cap, _ in _BIG_STORAGE if cap > capacity)
+
+
+def kitchen_cost(owned: int) -> int | None:
+    """Цена следующей очереди кухни, если уже куплено owned очередей (None — больше очередей не бывает)."""
+    return _KITCHEN_PRICES[owned] if owned < KITCHEN_MAX else None

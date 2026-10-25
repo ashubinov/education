@@ -15,9 +15,9 @@ from starlette.concurrency import run_in_threadpool
 from . import auth, slots
 from . import gamification as gm
 from .db import db
-from .farm_data import (ANIMALS, CAPACITY_STEP, CROPS, EXCHANGE_IN_RATE, EXCHANGE_MAX, EXCHANGE_OUT_RATE, ITEMS, MAX_CAPACITY, MAX_LEVEL,
-                        MAX_PLOTS, ORDER_SLOTS, PEN_SIZE, RECIPES, START_CAPACITY, START_COINS, START_PLOTS, capacity_cost, level_of, plot_cost,
-                        price_mult, sell_price, unlock_level, xp_for_level)
+from .farm_data import (ANIMALS, CAPACITY_STEP, CROPS, EXCHANGE_IN_RATE, EXCHANGE_MAX, EXCHANGE_OUT_RATE, ITEMS, KITCHEN_MAX, KITCHEN_NORMAL, MAX_CAPACITY,
+                        MAX_LEVEL, MAX_PLOTS, ORDER_SLOTS, PEN_SIZE, RECIPES, START_CAPACITY, START_COINS, START_PLOTS, capacity_cost, kitchen_cost,
+                        level_of, next_capacity, plot_cost, price_mult, sell_price, unlock_level, xp_for_level)
 
 router = APIRouter(prefix="/api/farm", tags=["Ферма"])
 _rng = secrets.SystemRandom()
@@ -43,6 +43,11 @@ class PenIn(Strict):
 
 class CookIn(Strict):
     recipe: str = Field(min_length=1, max_length=20)
+    slot: int | None = Field(default=None, ge=0, lt=KITCHEN_MAX)  # None — первая свободная очередь
+
+
+class CookCollectIn(Strict):
+    slot: int | None = Field(default=None, ge=0, lt=KITCHEN_MAX)  # None — из всех готовых очередей
 
 
 class SellIn(Strict):
@@ -77,13 +82,29 @@ def init_schema():
           user_id INTEGER NOT NULL, item TEXT NOT NULL, qty INTEGER NOT NULL, PRIMARY KEY(user_id, item)
         ) WITHOUT ROWID;
         CREATE TABLE IF NOT EXISTS farm_kitchen(
-          user_id INTEGER PRIMARY KEY, recipe TEXT NOT NULL, started_at REAL NOT NULL, ready_at REAL NOT NULL
-        );
+          user_id INTEGER NOT NULL, slot INTEGER NOT NULL DEFAULT 0, recipe TEXT NOT NULL, started_at REAL NOT NULL, ready_at REAL NOT NULL, PRIMARY KEY(user_id, slot)
+        ) WITHOUT ROWID;
         CREATE TABLE IF NOT EXISTS farm_orders(
           user_id INTEGER NOT NULL, slot INTEGER NOT NULL, items TEXT NOT NULL, coins INTEGER NOT NULL, xp INTEGER NOT NULL, PRIMARY KEY(user_id, slot)
         ) WITHOUT ROWID;
         """)
+        _migrate()
         db.conn.commit()
+
+
+def _migrate():
+    """Базы старых версий: у кухни одна очередь (ключ — только игрок), у фермы нет счётчика очередей."""
+    if "slot" not in {r[1] for r in db.conn.execute("PRAGMA table_info(farm_kitchen)")}:
+        db.conn.executescript("""
+        ALTER TABLE farm_kitchen RENAME TO farm_kitchen_old;
+        CREATE TABLE farm_kitchen(
+          user_id INTEGER NOT NULL, slot INTEGER NOT NULL DEFAULT 0, recipe TEXT NOT NULL, started_at REAL NOT NULL, ready_at REAL NOT NULL, PRIMARY KEY(user_id, slot)
+        ) WITHOUT ROWID;
+        INSERT INTO farm_kitchen(user_id, slot, recipe, started_at, ready_at) SELECT user_id, 0, recipe, started_at, ready_at FROM farm_kitchen_old;
+        DROP TABLE farm_kitchen_old;
+        """)
+    if "kitchen_slots" not in {r[1] for r in db.conn.execute("PRAGMA table_info(farm)")}:
+        db.conn.execute("ALTER TABLE farm ADD COLUMN kitchen_slots INTEGER NOT NULL DEFAULT 1")
 
 
 def delete_user_data(user_id: int):
@@ -187,18 +208,24 @@ def get_state(user_id: int, events: list | None = None) -> dict:
             left = max(0.0, r["ready_at"] - now)
             st = "ready" if left <= 0 else "working"
         pen_view.append({"pen": aid, "count": r["count"], "fed_count": r["fed_count"], "state": st, "left": round(left), "total": a["time"], "locked": lvl < a["level"]})
-    k = db.one("SELECT * FROM farm_kitchen WHERE user_id=?", (user_id,))
-    kitchen = None
-    if k:
-        left = max(0.0, k["ready_at"] - now)
-        kitchen = {"recipe": k["recipe"], "state": "ready" if left <= 0 else "working", "left": round(left), "total": round(k["ready_at"] - k["started_at"])}
+    jobs = {r["slot"]: r for r in db.q("SELECT * FROM farm_kitchen WHERE user_id=?", (user_id,))}
+    queues = []
+    for i in range(f["kitchen_slots"]):
+        k = jobs.get(i)
+        if not k:
+            queues.append({"slot": i, "state": "empty"})
+        else:
+            left = max(0.0, k["ready_at"] - now)
+            queues.append({"slot": i, "recipe": k["recipe"], "state": "ready" if left <= 0 else "working", "left": round(left), "total": round(k["ready_at"] - k["started_at"])})
+    kitchen = {"queues": queues, "count": f["kitchen_slots"], "max": KITCHEN_MAX, "normal": KITCHEN_NORMAL, "next_cost": kitchen_cost(f["kitchen_slots"]),
+               "ready": sum(1 for q in queues if q["state"] == "ready"), "working": sum(1 for q in queues if q["state"] == "working")}
     orders = [{"slot": r["slot"], "items": json.loads(r["items"]), "coins": r["coins"], "xp": r["xp"]} for r in db.q("SELECT * FROM farm_orders WHERE user_id=? ORDER BY slot", (user_id,))]
     stock = _stock(user_id)
     out = {
         "farm": {"level": lvl, "max_level": MAX_LEVEL, "xp": f["xp"], "xp_from": xp_for_level(lvl), "xp_next": xp_for_level(lvl + 1) if lvl < MAX_LEVEL else None, "coins": f["coins"],
                  "plots": f["plots"], "max_plots": MAX_PLOTS, "plot_cost": plot_cost(f["plots"]) if f["plots"] < MAX_PLOTS else None,
-                 "capacity": f["capacity"], "stock_total": sum(stock.values()), "capacity_cost": capacity_cost(f["capacity"]) if f["capacity"] < MAX_CAPACITY else None,
-                 "capacity_step": CAPACITY_STEP, "pen_size": PEN_SIZE},
+                 "capacity": f["capacity"], "stock_total": sum(stock.values()), "capacity_cost": capacity_cost(f["capacity"]), "capacity_next": next_capacity(f["capacity"]),
+                 "capacity_step": CAPACITY_STEP, "max_capacity": MAX_CAPACITY, "pen_size": PEN_SIZE},
         "plots": plot_view, "pens": pen_view, "kitchen": kitchen, "orders": orders, "stock": stock,
         "prices": {i: {"price": sell_price(i, day), "mult": price_mult(i, day)} for i in ITEMS},
         "catalog": {"crops": list(CROPS.values()), "animals": list(ANIMALS.values()), "recipes": list(RECIPES.values()), "items": ITEMS, "skip_cost": SKIP_COST},
@@ -349,7 +376,7 @@ def collect(user_id: int, pen: str) -> dict:
 
 
 # ----------------------------------------------------------------------------- кухня
-def cook(user_id: int, recipe_id: str) -> dict:
+def cook(user_id: int, recipe_id: str, slot: int | None = None) -> dict:
     r = RECIPES.get(recipe_id)
     if not r:
         raise HTTPException(400, "Такого рецепта нет")
@@ -357,34 +384,67 @@ def cook(user_id: int, recipe_id: str) -> dict:
     with db.tx():
         f = _farm(user_id)
         _need_level(_level(f), r["level"], r["name"])
-        if db.one("SELECT 1 FROM farm_kitchen WHERE user_id=?", (user_id,)):
-            raise HTTPException(400, "Кухня занята: сначала доделай или забери прошлое блюдо")
+        busy = {k["slot"] for k in db.q("SELECT slot FROM farm_kitchen WHERE user_id=?", (user_id,))}
+        if slot is None:
+            free = [i for i in range(f["kitchen_slots"]) if i not in busy]
+            if not free:
+                raise HTTPException(400, "Все очереди кухни заняты: доделай или забери прошлые блюда")
+            slot = free[0]
+        elif slot >= f["kitchen_slots"]:
+            raise HTTPException(400, "Такой очереди у тебя нет: докупи очередь на кухне")
+        elif slot in busy:
+            raise HTTPException(400, "Эта очередь занята: дождись блюда или забери его")
         stock = _stock(user_id)
         for it, q in r["needs"].items():
             if stock.get(it, 0) < q:
                 raise HTTPException(400, f"Не хватает: {ITEMS[it]['name'].lower()} ({stock.get(it, 0)}/{q})")
         for it, q in r["needs"].items():
             db.x("UPDATE farm_stock SET qty=qty-? WHERE user_id=? AND item=?", (q, user_id, it))
-        db.x("INSERT INTO farm_kitchen(user_id, recipe, started_at, ready_at) VALUES(?,?,?,?)", (user_id, recipe_id, now, now + r["time"]))
+        db.x("INSERT INTO farm_kitchen(user_id, slot, recipe, started_at, ready_at) VALUES(?,?,?,?,?)", (user_id, slot, recipe_id, now, now + r["time"]))
     return get_state(user_id)
 
 
-def cook_collect(user_id: int) -> dict:
+def cook_collect(user_id: int, slot: int | None = None) -> dict:
     ev: list = []
     now = time.time()
     with db.tx():
         f = _farm(user_id)
-        k = db.one("SELECT * FROM farm_kitchen WHERE user_id=?", (user_id,))
-        if not k:
+        rows = db.q("SELECT * FROM farm_kitchen WHERE user_id=? ORDER BY slot", (user_id,))
+        if slot is not None:
+            rows = [k for k in rows if k["slot"] == slot]
+        if not rows:
             raise HTTPException(400, "На кухне ничего не готовится")
-        if now < k["ready_at"]:
+        rows = [k for k in rows if k["ready_at"] <= now]
+        if not rows:
             raise HTTPException(400, "Ещё не готово")
-        r = RECIPES[k["recipe"]]
-        _need_room(user_id, f, r["qty"])
-        _stock_add(user_id, k["recipe"], r["qty"])
-        db.x("DELETE FROM farm_kitchen WHERE user_id=?", (user_id,))
-        _add_xp(user_id, r["xp"], ev)
+        total = sum(_stock(user_id).values())
+        got = gained = 0
+        for k in rows:
+            r = RECIPES[k["recipe"]]
+            if total + r["qty"] > f["capacity"]:
+                continue
+            total += r["qty"]
+            _stock_add(user_id, k["recipe"], r["qty"])
+            db.x("DELETE FROM farm_kitchen WHERE user_id=? AND slot=?", (user_id, k["slot"]))
+            gained += r["xp"]
+            got += 1
+        if not got:
+            raise HTTPException(400, f"На складе нет места ({total}/{f['capacity']}). Продай что-нибудь или расширь склад")
+        if got < len(rows):
+            ev.append({"type": "full", "left": len(rows) - got})
+        _add_xp(user_id, gained, ev)
     return get_state(user_id, ev)
+
+
+def buy_kitchen_slot(user_id: int) -> dict:
+    with db.tx():
+        f = _farm(user_id)
+        cost = kitchen_cost(f["kitchen_slots"])
+        if cost is None:
+            raise HTTPException(400, "Больше очередей на кухне не бывает")
+        _pay(user_id, f, cost)
+        db.x("UPDATE farm SET kitchen_slots=kitchen_slots+1 WHERE user_id=?", (user_id,))
+    return get_state(user_id)
 
 
 # ----------------------------------------------------------------------------- рынок, заказы, склад, обмен
@@ -441,7 +501,7 @@ def upgrade_storage(user_id: int) -> dict:
         if f["capacity"] >= MAX_CAPACITY:
             raise HTTPException(400, "Склад уже самый большой")
         _pay(user_id, f, capacity_cost(f["capacity"]))
-        db.x("UPDATE farm SET capacity=capacity+? WHERE user_id=?", (CAPACITY_STEP, user_id))
+        db.x("UPDATE farm SET capacity=? WHERE user_id=?", (next_capacity(f["capacity"]), user_id))
     return get_state(user_id)
 
 
@@ -505,12 +565,17 @@ async def api_collect(request: Request, body: PenIn):
 
 @router.post("/cook")
 async def api_cook(request: Request, body: CookIn):
-    return await run_in_threadpool(cook, _me(request)["id"], body.recipe)
+    return await run_in_threadpool(cook, _me(request)["id"], body.recipe, body.slot)
 
 
 @router.post("/cook/collect")
-async def api_cook_collect(request: Request):
-    return await run_in_threadpool(cook_collect, _me(request)["id"])
+async def api_cook_collect(request: Request, body: CookCollectIn | None = None):
+    return await run_in_threadpool(cook_collect, _me(request)["id"], body.slot if body else None)
+
+
+@router.post("/kitchen/buy")
+async def api_kitchen_buy(request: Request):
+    return await run_in_threadpool(buy_kitchen_slot, _me(request)["id"])
 
 
 @router.post("/sell")
